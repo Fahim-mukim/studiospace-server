@@ -52,13 +52,10 @@ const validStudioPayload = (overrides = {}) => ({
   ...overrides,
 });
 
-function createMockAuth({ user = authenticatedUser, session = true } = {}) {
-  return {
-    api: {
-      async getSession() {
-        return session ? { user, session: { id: "session-id" } } : null;
-      },
-    },
+function createTestAuthenticate({ user = authenticatedUser } = {}) {
+  return (request, _response, next) => {
+    request.user = user;
+    next();
   };
 }
 
@@ -126,14 +123,13 @@ function createMockDatabase({
 async function withServer(
   database,
   run,
-  { auth = null, getDatabaseStatus = () => "connected" } = {},
+  { authenticate = createTestAuthenticate() } = {},
 ) {
   const app = createApp({
     registerRoutes: (expressApp) =>
       registerStudioRoutes(expressApp, {
         getDatabase: () => database,
-        getDatabaseStatus,
-        auth,
+        authenticate,
       }),
   });
   const server = app.listen(0, "127.0.0.1");
@@ -230,7 +226,7 @@ test("POST /api/studios inserts one public studio and derives its owner from Bet
       assert.equal("_id" in body.data, false);
       assert.equal("rating" in body.data, false);
     },
-    { auth: createMockAuth() },
+    { authenticate: createTestAuthenticate() },
   );
 });
 
@@ -275,7 +271,7 @@ test("POST /api/studios ignores client-supplied ownership and server-managed fie
       assert.equal(stored.reviewCount, 0);
       assert.equal("rating" in stored, false);
     },
-    { auth: createMockAuth() },
+    { authenticate: createTestAuthenticate() },
   );
 });
 
@@ -304,7 +300,7 @@ test("POST /api/studios stores the canonical display label for every category", 
             categorySlug,
           );
         },
-        { auth: createMockAuth() },
+        { authenticate: createTestAuthenticate() },
       );
     });
   }
@@ -333,7 +329,7 @@ test("POST /api/studios generates distinct ObjectId-backed slugs", async () => {
       assert.match(first.data.slug, /^daylight-photo-studio-[\da-f]{24}$/);
       assert.match(second.data.slug, /^daylight-photo-studio-[\da-f]{24}$/);
     },
-    { auth: createMockAuth() },
+    { authenticate: createTestAuthenticate() },
   );
 });
 
@@ -355,7 +351,7 @@ test("POST /api/studios accepts HTTP image URLs", async () => {
         "http://images.example.test/studio.jpg",
       );
     },
-    { auth: createMockAuth() },
+    { authenticate: createTestAuthenticate() },
   );
 });
 
@@ -420,7 +416,7 @@ test("POST /api/studios rejects invalid studio fields with VALIDATION_ERROR", as
           assert.equal(body.details, null);
           assert.equal(database.calls.insertedDocuments.length, 0);
         },
-        { auth: createMockAuth() },
+        { authenticate: createTestAuthenticate() },
       );
     });
   }
@@ -440,61 +436,49 @@ test("POST /api/studios rejects invalid studio fields with VALIDATION_ERROR", as
         assert.equal(body.code, "VALIDATION_ERROR");
         assert.equal(database.calls.insertedDocuments.length, 0);
       },
-      { auth: createMockAuth() },
+      { authenticate: createTestAuthenticate() },
     );
   });
 });
 
-test("POST /api/studios returns safe errors for missing identity, session, or auth config", async (t) => {
-  await t.test("missing session", async () => {
-    const database = createMockDatabase();
-    await withServer(
-      database,
-      async (baseUrl) => {
-        const response = await fetch(`${baseUrl}/api/studios`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(validStudioPayload()),
-        });
-        assert.equal(response.status, 401);
-        assert.equal((await response.json()).code, "UNAUTHENTICATED");
-        assert.equal(database.calls.insertedDocuments.length, 0);
-      },
-      { auth: createMockAuth({ session: false }) },
-    );
-  });
-
-  await t.test("auth disabled", async () => {
-    const database = createMockDatabase();
-    await withServer(database, async (baseUrl) => {
+test("POST /api/studios rejects incomplete verified identities", async () => {
+  const database = createMockDatabase();
+  await withServer(
+    database,
+    async (baseUrl) => {
       const response = await fetch(`${baseUrl}/api/studios`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(validStudioPayload()),
       });
-      assert.equal(response.status, 503);
-      assert.equal((await response.json()).code, "AUTH_NOT_CONFIGURED");
+      assert.equal(response.status, 401);
+      assert.equal((await response.json()).code, "AUTH_USER_INCOMPLETE");
       assert.equal(database.calls.insertedDocuments.length, 0);
-    });
-  });
+    },
+    {
+      authenticate: createTestAuthenticate({
+        user: { id: "user-id", email: "", name: "" },
+      }),
+    },
+  );
+});
 
-  await t.test("incomplete authenticated user", async () => {
-    const database = createMockDatabase();
-    await withServer(
-      database,
-      async (baseUrl) => {
-        const response = await fetch(`${baseUrl}/api/studios`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(validStudioPayload()),
-        });
-        assert.equal(response.status, 401);
-        assert.equal((await response.json()).code, "AUTH_USER_INCOMPLETE");
-        assert.equal(database.calls.insertedDocuments.length, 0);
-      },
-      { auth: createMockAuth({ user: { id: "user-id", email: "", name: "" } }) },
-    );
-  });
+test("POST /api/studios rejects middleware without a verified identity", async () => {
+  const database = createMockDatabase();
+  await withServer(
+    database,
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/studios`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validStudioPayload()),
+      });
+      assert.equal(response.status, 401);
+      assert.equal((await response.json()).code, "AUTH_USER_INCOMPLETE");
+      assert.equal(database.calls.insertedDocuments.length, 0);
+    },
+    { authenticate: (_request, _response, next) => next() },
+  );
 });
 
 test("POST /api/studios returns 503 when MongoDB is unavailable", async () => {
@@ -514,34 +498,7 @@ test("POST /api/studios returns 503 when MongoDB is unavailable", async () => {
         details: null,
       });
     },
-    { auth: createMockAuth() },
-  );
-});
-
-test("POST /api/studios maps authentication database failures to 503", async () => {
-  const database = createMockDatabase();
-  await withServer(
-    database,
-    async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/studios`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(validStudioPayload()),
-      });
-      assert.equal(response.status, 503);
-      assert.equal((await response.json()).code, "DATABASE_NOT_READY");
-      assert.equal(database.calls.insertedDocuments.length, 0);
-    },
-    {
-      auth: {
-        api: {
-          async getSession() {
-            throw new Error("private MongoDB connection detail");
-          },
-        },
-      },
-      getDatabaseStatus: () => "disconnected",
-    },
+    { authenticate: createTestAuthenticate() },
   );
 });
 
@@ -563,7 +520,7 @@ test("POST /api/studios insert failures use the standard safe error response", a
       assert.equal(body.message, "An unexpected server error occurred");
       assert.equal(JSON.stringify(body).includes("private MongoDB"), false);
     },
-    { auth: createMockAuth() },
+    { authenticate: createTestAuthenticate() },
   );
 });
 
@@ -592,7 +549,7 @@ test("a created studio is immediately retrievable by slug and ObjectId", async (
       assert.equal("ownerEmail" in slugResult.data, false);
       assert.equal("ownerEmail" in idResult.data, false);
     },
-    { auth: createMockAuth() },
+    { authenticate: createTestAuthenticate() },
   );
 });
 

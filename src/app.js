@@ -7,7 +7,6 @@ import { createHealthRouter } from "./routes/health.routes.js";
 export function createApp({
   clientOrigins = ["http://localhost:3000"],
   getDatabaseStatus = () => "not_configured",
-  registerAuthHandler = () => {},
   registerRoutes = () => {},
 } = {}) {
   const allowedOrigins = new Set(clientOrigins);
@@ -22,7 +21,6 @@ export function createApp({
       credentials: true,
     }),
   );
-  registerAuthHandler(app);
   app.use(express.json({ limit: "1mb" }));
   app.use("/api", createHealthRouter({ getDatabaseStatus }));
   registerRoutes(app);

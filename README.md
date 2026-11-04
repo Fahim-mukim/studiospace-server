@@ -2,9 +2,8 @@
 
 The StudioSpace Server is the independent Express.js REST API application.
 It provides health/readiness endpoints, MongoDB-backed public studio reads,
-and optional BetterAuth email/password and Google OAuth authentication. The
-Next.js client is maintained, configured, and deployed separately; the
-projects communicate only through HTTP APIs.
+and protected studio creation. The independently maintained Next.js Client
+owns BetterAuth and communicates with this Server through HTTP APIs.
 
 ## Requirements
 
@@ -42,10 +41,7 @@ contains only safe sample values.
 | `CLIENT_URL` | Exact allowed client origin(s); multiple origins may be comma-separated | `http://localhost:3000` |
 | `MONGODB_URI` | MongoDB connection URI | `mongodb://127.0.0.1:27017` in `.env.example` |
 | `MONGODB_DB_NAME` | Database selected by the driver | `studiospace` |
-| `BETTER_AUTH_URL` | Public origin of this API; required with the auth secret | Empty (authentication disabled) |
-| `BETTER_AUTH_SECRET` | High-entropy BetterAuth signing secret; required with the auth URL | Empty (authentication disabled) |
-| `GOOGLE_CLIENT_ID` | Optional Google OAuth client ID; configure with its matching secret | Empty |
-| `GOOGLE_CLIENT_SECRET` | Optional Google OAuth client secret; configure with its matching ID | Empty |
+| `CLIENT_AUTH_URL` | Canonical Next.js origin used as the JWT issuer and JWKS endpoint base | `http://localhost:3000` in development |
 | `NODE_ENV` | Runtime environment | `development` |
 
 Development always allows the `http://localhost:3000` origin in addition to
@@ -55,87 +51,61 @@ origins are not used.
 
 ## Authentication
 
-Authentication uses BetterAuth with the existing MongoDB client and database.
-It is not enabled unless both `BETTER_AUTH_URL` and a high-entropy
-`BETTER_AUTH_SECRET` are configured. In development, missing auth configuration
-leaves the API available but returns HTTP 503 with `AUTH_NOT_CONFIGURED` from
-auth endpoints and protected middleware. Production startup requires the
-MongoDB and BetterAuth configuration and at least one configured `CLIENT_URL`.
+BetterAuth is owned by the independent Next.js Client, not this Express
+Server. This Server does not expose BetterAuth signup/login/logout handlers,
+configure Google OAuth, or own authentication credentials or persistence.
+The Client remains responsible for signup, login, OAuth, session management,
+and its BetterAuth MongoDB `user`, `account`, `session`, and JWKS records.
+The browser must never connect to MongoDB directly.
 
-Generate a signing secret locally instead of using a committed secret:
+For protected API requests, this Server verifies the Client's short-lived
+JWT-backed session-data cookie using `jose` and the Client's remote JWKS
+endpoint:
 
-```sh
-node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```text
+Issuer:   CLIENT_AUTH_URL
+JWKS:     CLIENT_AUTH_URL/api/auth/jwks
+Audience: better-auth:session-cache
+Cookie:   better-auth.session_data (or its secure/chunked variant)
 ```
 
-Email/password authentication supports BetterAuth's standard endpoints:
+The verifier checks the EdDSA signature, issuer, audience, token type,
+expiration, and consistency of the signed user/session identity before
+attaching `request.user`. It never accepts a client-submitted user ID as
+identity. The opaque `better-auth.session_token` cookie is not a JWT and is
+never used for verification. A valid session-data cookie is an optimistic
+cached representation, so logout or session invalidation may take up to the
+Client's configured 60-second cache lifetime to be reflected by this API.
+Missing or invalid credentials return HTTP 401; unavailable JWKS verification
+returns HTTP 503. JWKS resolvers are reused per endpoint.
 
-| Action | Endpoint |
-|---|---|
-| Register | `POST /api/auth/sign-up/email` |
-| Sign in | `POST /api/auth/sign-in/email` |
-| Sign out | `POST /api/auth/sign-out` |
-| Current session | `GET /api/auth/get-session` |
+`CLIENT_URL` controls the exact allowed browser origins for credentialed CORS.
+`CLIENT_AUTH_URL` is separately the canonical Client issuer origin. In local
+development these are typically `http://localhost:3000`; the Express API uses
+`http://localhost:5000`.
 
-Registration requires 6–128 characters, including an uppercase and a
-lowercase letter. The optional BetterAuth `image` field must be a valid
-HTTP(S) URL. The server rejects unsupported signup fields, including
-client-supplied server-managed user fields. BetterAuth hashes passwords and
-`autoSignIn: false` requires a separate explicit login after registration.
+### Cookie and deployment limitation
 
-With auto sign-in disabled, BetterAuth returns an intentionally
-indistinguishable success-shaped response for a duplicate email to reduce
-email enumeration. The client therefore reports that the signup request was
-received and asks the user to continue to sign in; it does not claim that a
-new database user was created.
+Credentialed CORS does not transfer a cookie between hosts. BetterAuth's
+HTTP-only cookies are host-only by default, so a cookie set for the Next.js
+host is not automatically sent to a different Express API host. `SameSite`
+and browser third-party-cookie policies can impose additional restrictions.
+Production Client/Server domains were not available to verify. Before relying
+on direct browser-to-Express authentication in production, use a same-origin
+Next.js proxy/BFF or deliberately configure and verify a compatible shared
+cookie domain and cross-origin cookie policy. Do not weaken secure cookie
+settings as a workaround. The Server-side JWT verifier is in place, but
+production cookie transport is not yet confirmed.
 
-BetterAuth persists users, credential accounts (including password hashes),
-and sessions in the MongoDB `user`, `account`, and `session` collections.
-Session cookies are HTTP-only. The client does not persist passwords or
-session data in browser storage.
+### Authentication test coverage
 
-### Opt-in MongoDB authentication integration test
-
-The normal test suite skips the live database integration test unless both
-`MONGODB_TEST_URI` and `MONGODB_TEST_DB_NAME` are explicitly set. The test
-never falls back to `MONGODB_URI`; the database name must clearly contain
-`test`. Use a dedicated test database, not the application database. For a
-local MongoDB test instance in PowerShell:
-
-```powershell
-$env:MONGODB_TEST_URI = "mongodb://127.0.0.1:27017"
-$env:MONGODB_TEST_DB_NAME = "studiospace_auth_test"
-npm test
-Remove-Item Env:MONGODB_TEST_URI
-Remove-Item Env:MONGODB_TEST_DB_NAME
-```
-
-The test uses a unique email, exercises the real HTTP BetterAuth handler and
-MongoDB adapter, and removes only the user, account, and session records
-created for that email. It does not drop the database or clear collections.
-Without both explicit variables, `npm test` prints a skip reason.
-
-Google OAuth is enabled only when both `GOOGLE_CLIENT_ID` and
-`GOOGLE_CLIENT_SECRET` are configured. For local API development, register
-`http://localhost:5000/api/auth/callback/google` as the Google OAuth callback
-URL. For deployment, use
-`<BETTER_AUTH_URL>/api/auth/callback/google` and configure the corresponding
-provider origin/redirect settings.
-
-The primary `session_token` is an opaque, HTTP-only cookie. A separate
-`session_data` cookie caches session data as a JWT for 60 seconds; the JWT
-plugin signs this cache using its managed keys. Cookies use `SameSite=Lax` and
-are secure in production. Keep the frontend origin in `CLIENT_URL`, enable
-credentialed requests in the client, and use the exact API URL. Browser
-third-party-cookie restrictions can prevent cookies from working when client
-and API are on unrelated sites; prefer a shared parent domain or a same-origin
-reverse proxy rather than weakening cookie protections.
-
-Google OAuth, password flows, cookie handling, and auth middleware are
-implemented in the server. No frontend auth integration, email verification or
-password-reset delivery, role system, or protected product route is included
-in this milestone. The reusable `requireAuth` middleware is available for
-future protected routes.
+Server tests generate signed test JWTs and exercise the real verifier and
+protected `/api/studios` route, including invalid claims, JWKS failures,
+identity-derived ownership, and rejection of unauthenticated requests. They
+do not test BetterAuth or MongoDB authentication persistence. Real signup,
+credential/session persistence, cookie issuance, and logout integration tests
+belong to the Next.js Client repository, which owns that authentication
+instance and its dedicated opt-in MongoDB integration test.
 
 ## Run
 
@@ -253,9 +223,9 @@ this milestone.
 ### `POST /api/studios`
 
 Creates one studio in the MongoDB `studios` collection. This endpoint requires
-a valid BetterAuth session cookie; send credentialed requests from the
-configured client origin. It uses the same shared MongoDB connection as the
-public GET endpoints.
+a valid JWT-backed session-data cookie issued by the Next.js Client; send
+credentialed requests from a configured client origin. It uses the same
+shared MongoDB connection as the public GET endpoints.
 
 The client submits these fields:
 
@@ -281,12 +251,12 @@ the authenticated BetterAuth user. Submitted ownership or server-managed
 fields are ignored and cannot override those values. Owner email and other
 private ownership fields are never included in public studio responses.
 
-Example request:
+Example request (the opaque `session_token` is not accepted as a JWT):
 
 ```http
 POST /api/studios
 Content-Type: application/json
-Cookie: better-auth.session_token=...
+Cookie: better-auth.session_data=<JWT>
 ```
 
 ```json
@@ -331,11 +301,12 @@ Validation errors return HTTP 400:
 }
 ```
 
-Missing or invalid sessions return HTTP 401 with `code: "UNAUTHENTICATED"`.
-If BetterAuth is disabled, the endpoint returns HTTP 503 with
-`code: "AUTH_NOT_CONFIGURED"`. If MongoDB is unavailable after authentication,
-it returns HTTP 503 with `code: "DATABASE_NOT_READY"`. Database errors use the
-standard generic HTTP 500 response without MongoDB internals.
+Missing or invalid JWT-backed session cookies return HTTP 401 with
+`code: "UNAUTHENTICATED"`. If the Client JWKS endpoint cannot be reached,
+verification returns HTTP 503 with `code: "AUTHENTICATION_UNAVAILABLE"`. If
+MongoDB is unavailable after authentication, the endpoint returns HTTP 503
+with `code: "DATABASE_NOT_READY"`. Database errors use the standard generic
+HTTP 500 response without MongoDB internals.
 
 The created studio can be fetched immediately with
 `GET /api/studios/<slug>` or `GET /api/studios/<id>`, and also appears in

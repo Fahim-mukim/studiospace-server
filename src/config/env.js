@@ -4,23 +4,6 @@ dotenv.config();
 
 const DEVELOPMENT_CLIENT_ORIGIN = "http://localhost:3000";
 
-function hasHighEntropy(secret) {
-  if (secret.length < 32) return false;
-
-  const frequencies = new Map();
-  for (const character of secret) {
-    frequencies.set(character, (frequencies.get(character) ?? 0) + 1);
-  }
-  if (frequencies.size < 16) return false;
-
-  const entropy = [...frequencies.values()].reduce((total, count) => {
-    const probability = count / secret.length;
-    return total - probability * Math.log2(probability);
-  }, 0);
-
-  return entropy >= 4.3;
-}
-
 function parseClientOrigins(value, nodeEnv) {
   const configuredOrigins = value
     ? value.split(",").map((item) => item.trim()).filter(Boolean)
@@ -51,18 +34,25 @@ function parseClientOrigins(value, nodeEnv) {
   if (nodeEnv === "development") {
     origins.add(DEVELOPMENT_CLIENT_ORIGIN);
   }
+  if (nodeEnv === "production" && origins.size === 0) {
+    throw new Error("CLIENT_URL is required in production.");
+  }
 
   return [...origins];
 }
 
-function parseBetterAuthUrl(value, nodeEnv) {
-  if (!value) return "";
+function parseClientAuthUrl(value, nodeEnv) {
+  const configuredOrigin =
+    value || (nodeEnv === "development" ? DEVELOPMENT_CLIENT_ORIGIN : "");
+  if (!configuredOrigin) {
+    throw new Error("CLIENT_AUTH_URL is required outside development.");
+  }
 
   let url;
   try {
-    url = new URL(value);
+    url = new URL(configuredOrigin);
   } catch {
-    throw new Error("BETTER_AUTH_URL must be a valid HTTP(S) server origin.");
+    throw new Error("CLIENT_AUTH_URL must be a valid HTTP(S) origin.");
   }
 
   if (
@@ -74,7 +64,7 @@ function parseBetterAuthUrl(value, nodeEnv) {
     url.hash ||
     (nodeEnv === "production" && url.protocol !== "https:")
   ) {
-    throw new Error("BETTER_AUTH_URL must be a valid HTTP(S) server origin.");
+    throw new Error("CLIENT_AUTH_URL must be a valid HTTP(S) origin.");
   }
 
   return url.origin;
@@ -95,38 +85,12 @@ export function loadConfig(env = process.env) {
     throw new Error("MONGODB_DB_NAME is required when MONGODB_URI is configured.");
   }
 
-  const betterAuthSecret = env.BETTER_AUTH_SECRET?.trim() || "";
-  const betterAuthUrl = parseBetterAuthUrl(env.BETTER_AUTH_URL?.trim(), nodeEnv);
-  if (betterAuthSecret && !hasHighEntropy(betterAuthSecret)) {
-    throw new Error(
-      "BETTER_AUTH_SECRET must be at least 32 characters and have high entropy.",
-    );
-  }
-  if (Boolean(betterAuthSecret) !== Boolean(betterAuthUrl)) {
-    throw new Error(
-      "BETTER_AUTH_SECRET and BETTER_AUTH_URL must be configured together.",
-    );
-  }
-
-  const googleClientId = env.GOOGLE_CLIENT_ID?.trim() || "";
-  const googleClientSecret = env.GOOGLE_CLIENT_SECRET?.trim() || "";
-  if (Boolean(googleClientId) !== Boolean(googleClientSecret)) {
-    throw new Error(
-      "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be configured together.",
-    );
-  }
-
   return {
     port,
     clientOrigins: parseClientOrigins(env.CLIENT_URL, nodeEnv),
+    clientAuthUrl: parseClientAuthUrl(env.CLIENT_AUTH_URL?.trim(), nodeEnv),
     mongodbUri,
     mongodbDbName,
-    betterAuthSecret,
-    betterAuthUrl,
-    authEnabled: Boolean(betterAuthSecret && betterAuthUrl),
-    googleClientId,
-    googleClientSecret,
-    googleOauthEnabled: Boolean(googleClientId && googleClientSecret),
     nodeEnv,
   };
 }

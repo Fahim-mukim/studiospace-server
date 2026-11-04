@@ -1,19 +1,17 @@
 import { pathToFileURL } from "node:url";
-import { betterAuth } from "better-auth";
-import { APIError, createAuthMiddleware } from "better-auth/api";
-import { mongodbAdapter } from "better-auth/adapters/mongodb";
-import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
-import { jwt } from "better-auth/plugins";
 import { createApp } from "./src/app.js";
 import { loadConfig } from "./src/config/env.js";
 import {
   closeDatabase,
   connectDatabase,
   getDatabase,
-  getMongoClient,
   getDatabaseStatus,
 } from "./src/config/database.js";
 import { ObjectId } from "mongodb";
+import {
+  createRequireAuth,
+  getRemoteJwksResolver,
+} from "./src/middleware/require-auth.js";
 
 const studioCategories = {
   "photo-studios": "Photo Studios",
@@ -68,177 +66,13 @@ const publicStudioFields = [
   "reviewCount",
 ];
 const publicHostFields = ["name", "displayName", "avatar", "profileImage", "bio"];
-const emailSignupFields = new Set([
-  "name",
-  "email",
-  "password",
-  "image",
-  "callbackURL",
-  "rememberMe",
-]);
-
-export function validateSignUpInput(context) {
-  if (context.path !== "/sign-up/email") return;
-
-  const body = context.body ?? {};
-  if (typeof body !== "object" || Array.isArray(body)) {
-    throw new APIError("BAD_REQUEST", {
-      message: "Signup body must be an object.",
-    });
-  }
-
-  if (Object.keys(body).some((field) => !emailSignupFields.has(field))) {
-    throw new APIError("BAD_REQUEST", {
-      message: "Signup contains unsupported fields.",
-    });
-  }
-
-  const password = body.password;
-  if (
-    typeof password === "string" &&
-    (!/[a-z]/.test(password) || !/[A-Z]/.test(password))
-  ) {
-    throw new APIError("BAD_REQUEST", {
-      message: "Password must contain at least one lowercase and one uppercase letter.",
-    });
-  }
-
-  let normalizedBody = body;
-  if (Object.hasOwn(body, "image")) {
-    if (typeof body.image !== "string") {
-      throw new APIError("BAD_REQUEST", {
-        message: "Image must be a valid HTTP(S) URL.",
-      });
-    }
-
-    const image = body.image.trim();
-    let parsedImage;
-    try {
-      parsedImage = new URL(image);
-    } catch {
-      throw new APIError("BAD_REQUEST", {
-        message: "Image must be a valid HTTP(S) URL.",
-      });
-    }
-    if (!["http:", "https:"].includes(parsedImage.protocol)) {
-      throw new APIError("BAD_REQUEST", {
-        message: "Image must be a valid HTTP(S) URL.",
-      });
-    }
-    normalizedBody = { ...body, image };
-  }
-
-  return {
-    context: {
-      ...context,
-      body: normalizedBody,
-    },
-  };
-}
-
-export function buildBetterAuthOptions({ database, mongoClient, config }) {
-  return {
-    appName: "StudioSpace",
-    baseURL: config.betterAuthUrl,
-    secret: config.betterAuthSecret,
-    trustedOrigins: config.clientOrigins,
-    database: mongodbAdapter(database, {
-      client: mongoClient,
-      transaction: false,
-    }),
-    emailAndPassword: {
-      enabled: true,
-      autoSignIn: false,
-      minPasswordLength: 6,
-      maxPasswordLength: 128,
-    },
-    socialProviders: config.googleOauthEnabled
-      ? {
-          google: {
-            clientId: config.googleClientId,
-            clientSecret: config.googleClientSecret,
-          },
-        }
-      : {},
-    session: {
-      cookieCache: {
-        enabled: true,
-        maxAge: 60,
-        strategy: "jwt",
-      },
-    },
-    advanced: {
-      defaultCookieAttributes: {
-        httpOnly: true,
-        sameSite: "lax",
-        ...(config.nodeEnv === "production" ? { secure: true } : {}),
-      },
-    },
-    plugins: [jwt({ sessionCookieCache: true })],
-    hooks: {
-      before: createAuthMiddleware(validateSignUpInput),
-    },
-  };
-}
-
-export function createBetterAuth(dependencies) {
-  return betterAuth(buildBetterAuthOptions(dependencies));
-}
-
-export function registerAuthHandler(app, auth) {
-  const handler = auth
-    ? toNodeHandler(auth)
-    : (_request, response) =>
-        response.status(503).json({
-          success: false,
-          message: "Authentication is not configured",
-          code: "AUTH_NOT_CONFIGURED",
-          details: null,
-        });
-
-  app.all("/api/auth", handler);
-  app.all("/api/auth/*splat", handler);
-}
-
-export function requireAuth(auth, { getDatabaseStatus } = {}) {
-  return async (request, response, next) => {
-    if (!auth) {
-      return response.status(503).json({
-        success: false,
-        message: "Authentication is not configured",
-        code: "AUTH_NOT_CONFIGURED",
-        details: null,
-      });
-    }
-
-    try {
-      const session = await auth.api.getSession({
-        headers: fromNodeHeaders(request.headers),
-      });
-      if (!session?.user) {
-        return response.status(401).json({
-          success: false,
-          message: "Authentication is required",
-          code: "UNAUTHENTICATED",
-          details: null,
-        });
-      }
-
-      request.authSession = session;
-      request.user = session.user;
-      return next();
-    } catch (error) {
-      if (getDatabaseStatus && getDatabaseStatus() !== "connected") {
-        return response.status(503).json({
-          success: false,
-          message: "Database is not available",
-          code: "DATABASE_NOT_READY",
-          details: null,
-        });
-      }
-      return next(error);
-    }
-  };
+function rejectUnauthenticated(_request, response) {
+  return response.status(401).json({
+    success: false,
+    message: "Authentication is required",
+    code: "UNAUTHENTICATED",
+    details: null,
+  });
 }
 
 function invalidQuery(message) {
@@ -505,13 +339,12 @@ export function registerStudioRoutes(
   app,
   {
     getDatabase: resolveDatabase,
-    getDatabaseStatus = () => "connected",
-    auth = null,
+    authenticate = rejectUnauthenticated,
   },
 ) {
   app.post(
     "/api/studios",
-    requireAuth(auth, { getDatabaseStatus }),
+    authenticate,
     async (request, response) => {
       const db = resolveDatabase();
       if (!db) {
@@ -524,6 +357,14 @@ export function registerStudioRoutes(
       }
 
       const user = request.user;
+      if (!user || typeof user !== "object") {
+        return response.status(401).json({
+          success: false,
+          message: "Authenticated user must have an ID, email, and name",
+          code: "AUTH_USER_INCOMPLETE",
+          details: null,
+        });
+      }
       const ownerEmail =
         typeof user.email === "string" ? user.email.trim().toLowerCase() : "";
       const ownerName = typeof user.name === "string" ? user.name.trim() : "";
@@ -666,18 +507,9 @@ export function registerStudioRoutes(
 export async function startServer() {
   const config = loadConfig();
 
-  if (config.nodeEnv === "production" && !config.authEnabled) {
+  if (config.nodeEnv === "production" && config.clientOrigins.length === 0) {
     throw new Error(
-      "BETTER_AUTH_SECRET and BETTER_AUTH_URL are required in production; the server was not started.",
-    );
-  }
-  if (
-    config.nodeEnv === "production" &&
-    config.authEnabled &&
-    config.clientOrigins.length === 0
-  ) {
-    throw new Error(
-      "CLIENT_URL is required in production when authentication is enabled.",
+      "CLIENT_URL is required in production for credentialed CORS.",
     );
   }
 
@@ -705,34 +537,20 @@ export async function startServer() {
     );
   }
 
-  const auth = config.authEnabled && getDatabase()
-    ? createBetterAuth({
-        database: getDatabase(),
-        mongoClient: getMongoClient(),
-        config,
-      })
-    : null;
-
-  if (!config.authEnabled) {
-    console.warn(
-      "BetterAuth is not configured; authentication endpoints will return 503.",
-    );
-  } else if (!auth) {
-    console.warn(
-      "BetterAuth is disabled because MongoDB is not connected; authentication endpoints will return 503.",
-    );
-  }
+  const authenticate = createRequireAuth({
+    issuer: config.clientAuthUrl,
+    jwksResolver: getRemoteJwksResolver(
+      `${config.clientAuthUrl}/api/auth/jwks`,
+    ),
+  });
 
   const app = createApp({
     clientOrigins: config.clientOrigins,
     getDatabaseStatus,
-    registerAuthHandler: (expressApp) =>
-      registerAuthHandler(expressApp, auth),
     registerRoutes: (expressApp) =>
       registerStudioRoutes(expressApp, {
         getDatabase,
-        getDatabaseStatus,
-        auth,
+        authenticate,
       }),
   });
   const server = await new Promise((resolve, reject) => {

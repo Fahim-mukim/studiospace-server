@@ -1,23 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { randomBytes } from "node:crypto";
 import { loadConfig } from "../src/config/env.js";
 
-test("development config includes its local client origin fallback", () => {
+test("development config defaults Client CORS and authentication to localhost", () => {
   const config = loadConfig({
     NODE_ENV: "development",
     PORT: "5000",
   });
   assert.deepEqual(config.clientOrigins, ["http://localhost:3000"]);
+  assert.equal(config.clientAuthUrl, "http://localhost:3000");
   assert.equal(config.mongodbUri, "");
   assert.equal(config.mongodbDbName, "studiospace");
 });
 
-test("production config allows only explicitly configured client origins", () => {
+test("production config requires explicit Client and database settings", () => {
   const config = loadConfig({
     NODE_ENV: "production",
     PORT: "5000",
     CLIENT_URL: "https://studio.example,https://admin.example",
+    CLIENT_AUTH_URL: "https://studio.example",
     MONGODB_URI: "mongodb://example.invalid:27017",
     MONGODB_DB_NAME: "studiospace",
   });
@@ -25,9 +26,27 @@ test("production config allows only explicitly configured client origins", () =>
     "https://studio.example",
     "https://admin.example",
   ]);
+  assert.equal(config.clientAuthUrl, "https://studio.example");
+
+  assert.throws(
+    () =>
+      loadConfig({
+        NODE_ENV: "production",
+        CLIENT_URL: "https://studio.example",
+      }),
+    /CLIENT_AUTH_URL is required outside development/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        NODE_ENV: "production",
+        CLIENT_AUTH_URL: "https://studio.example",
+      }),
+    /CLIENT_URL is required in production/,
+  );
 });
 
-test("invalid port and non-origin client URLs are rejected", () => {
+test("invalid port and non-origin URLs are rejected", () => {
   assert.throws(
     () => loadConfig({ NODE_ENV: "development", PORT: "not-a-port" }),
     /PORT must be an integer/,
@@ -37,66 +56,36 @@ test("invalid port and non-origin client URLs are rejected", () => {
       loadConfig({
         NODE_ENV: "production",
         CLIENT_URL: "https://studio.example/path",
+        CLIENT_AUTH_URL: "https://studio.example",
       }),
     /CLIENT_URL must contain valid HTTP\(S\) origins/,
   );
-});
-
-test("BetterAuth requires a high-entropy secret and server origin together", () => {
-  const secret = randomBytes(32).toString("base64url");
-  const config = loadConfig({
-    NODE_ENV: "development",
-    BETTER_AUTH_SECRET: secret,
-    BETTER_AUTH_URL: "http://localhost:5000",
-  });
-  assert.equal(config.authEnabled, true);
-  assert.equal(config.betterAuthUrl, "http://localhost:5000");
-
-  assert.throws(
-    () =>
-      loadConfig({
-        NODE_ENV: "development",
-        BETTER_AUTH_SECRET: "not-a-secure-secret",
-        BETTER_AUTH_URL: "http://localhost:5000",
-      }),
-    /BETTER_AUTH_SECRET must be at least 32 characters and have high entropy/,
-  );
-  assert.throws(
-    () =>
-      loadConfig({
-        NODE_ENV: "development",
-        BETTER_AUTH_SECRET: secret,
-      }),
-    /BETTER_AUTH_SECRET and BETTER_AUTH_URL must be configured together/,
-  );
-});
-
-test("BetterAuth URL and Google OAuth credentials are validated", () => {
-  const secret = randomBytes(32).toString("base64url");
   assert.throws(
     () =>
       loadConfig({
         NODE_ENV: "production",
-        BETTER_AUTH_SECRET: secret,
-        BETTER_AUTH_URL: "http://api.example.com",
+        CLIENT_URL: "https://studio.example",
+        CLIENT_AUTH_URL: "http://studio.example",
       }),
-    /BETTER_AUTH_URL must be a valid HTTP\(S\) server origin/,
+    /CLIENT_AUTH_URL must be a valid HTTP\(S\) origin/,
   );
   assert.throws(
     () =>
       loadConfig({
         NODE_ENV: "development",
-        GOOGLE_CLIENT_ID: "client-id",
+        CLIENT_AUTH_URL: "http://localhost:3000/api/auth",
       }),
-    /GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be configured together/,
+    /CLIENT_AUTH_URL must be a valid HTTP\(S\) origin/,
   );
+});
 
-  const config = loadConfig({
-    NODE_ENV: "development",
-    BETTER_AUTH_SECRET: secret,
-    BETTER_AUTH_URL: "http://localhost:5000",
-    GOOGLE_CLIENT_ID: "client-id",
-    GOOGLE_CLIENT_SECRET: "client-secret",
-  });
-  assert.equal(config.googleOauthEnabled, true);
+test("MongoDB database name is required when a URI is configured", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        NODE_ENV: "development",
+        MONGODB_URI: "mongodb://example.invalid:27017",
+      }),
+    /MONGODB_DB_NAME is required/,
+  );
 });
