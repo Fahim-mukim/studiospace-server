@@ -4,6 +4,7 @@ import { loadConfig } from "./src/config/env.js";
 import {
   closeDatabase,
   connectDatabase,
+  getDatabaseStatus,
 } from "./src/config/database.js";
 
 export async function startServer() {
@@ -33,7 +34,10 @@ export async function startServer() {
     );
   }
 
-  const app = createApp({ clientOrigins: config.clientOrigins });
+  const app = createApp({
+    clientOrigins: config.clientOrigins,
+    getDatabaseStatus,
+  });
   const server = await new Promise((resolve, reject) => {
     const httpServer = app.listen(config.port);
     const onError = (error) => reject(error);
