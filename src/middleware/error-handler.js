@@ -1,8 +1,10 @@
 export function errorHandler(error, request, response, next) {
   if (response.headersSent) return next(error);
 
+  const isValidationError =
+    error?.code === "INVALID_QUERY" || error?.code === "VALIDATION_ERROR";
   const status =
-    error?.code === "INVALID_QUERY"
+    isValidationError
       ? 400
       : error?.type === "entity.parse.failed"
         ? 400
@@ -21,20 +23,19 @@ export function errorHandler(error, request, response, next) {
   response.status(status).json({
     success: false,
     message: isClientError
-      ? error?.code === "INVALID_QUERY"
+      ? isValidationError
         ? error.safeMessage
         : status === 400
           ? "The request body contains invalid JSON"
           : "The request body is too large"
       : "An unexpected server error occurred",
-    code:
-      error?.code === "INVALID_QUERY"
-        ? "INVALID_QUERY"
-        : status === 400
-          ? "INVALID_JSON"
-          : status === 413
-            ? "PAYLOAD_TOO_LARGE"
-            : "INTERNAL_SERVER_ERROR",
+    code: isValidationError
+      ? error.code
+      : status === 400
+        ? "INVALID_JSON"
+        : status === 413
+          ? "PAYLOAD_TOO_LARGE"
+          : "INTERNAL_SERVER_ERROR",
     details: null,
   });
 }

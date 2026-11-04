@@ -216,8 +216,99 @@ An unknown studio returns HTTP 404:
 }
 ```
 
-No studio create/update/delete, booking, or client API integration is included
-in this milestone.
+Studio update/delete, booking, and client API integration are not included in
+this milestone.
+
+### `POST /api/studios`
+
+Creates one studio in the MongoDB `studios` collection. This endpoint requires
+a valid BetterAuth session cookie; send credentialed requests from the
+configured client origin. It uses the same shared MongoDB connection as the
+public GET endpoints.
+
+The client submits these fields:
+
+| Field | Validation |
+|---|---|
+| `title` | Required trimmed string, 3–100 characters |
+| `categorySlug` | Required; `photo-studios`, `sound-stages`, `podcast-rooms`, `music-suites`, or `art-workshops` |
+| `hourlyRate` | Required finite positive number |
+| `securityDeposit` | Required finite non-negative number |
+| `capacity` | Required positive safe integer |
+| `location` | Required trimmed string, 2–160 characters |
+| `image` | Required valid HTTP(S) URL (maximum 2,048 characters) |
+| `imageAlt` | Optional trimmed string, maximum 250 characters |
+| `amenities` | Required array of 1–20 non-empty strings, each at most 80 characters; duplicate values are removed |
+| `overview` | Required trimmed description, 30–2,000 characters |
+
+`image` is the resulting URL after the separate client-side image upload flow;
+this API does not upload files or manage image-host credentials. The server
+derives the display `category` from `categorySlug`, generates the ObjectId and
+unique slug, timestamps, and initial `reviewCount`, and derives `ownerId`,
+lowercase `ownerEmail`, `ownerName`, and the public `host` display fields from
+the authenticated BetterAuth user. Submitted ownership or server-managed
+fields are ignored and cannot override those values. Owner email and other
+private ownership fields are never included in public studio responses.
+
+Example request:
+
+```http
+POST /api/studios
+Content-Type: application/json
+Cookie: better-auth.session_token=...
+```
+
+```json
+{
+  "title": "Daylight Photo Studio",
+  "categorySlug": "photo-studios",
+  "hourlyRate": 95,
+  "securityDeposit": 150,
+  "capacity": 8,
+  "location": "Brooklyn, New York",
+  "image": "https://images.example.com/daylight-studio.jpg",
+  "imageAlt": "A bright photography studio",
+  "amenities": ["Natural light", "Backdrop", "Changing area"],
+  "overview": "A detailed description of the studio and its creative space."
+}
+```
+
+Success returns HTTP 201 and the safe public studio representation:
+
+```json
+{
+  "success": true,
+  "message": "Studio created successfully",
+  "data": {
+    "id": "65c7a6b0c9d2fddc4493e001",
+    "title": "Daylight Photo Studio",
+    "slug": "daylight-photo-studio-65c7a6b0c9d2fddc4493e001",
+    "category": "Photo Studios",
+    "categorySlug": "photo-studios"
+  }
+}
+```
+
+Validation errors return HTTP 400:
+
+```json
+{
+  "success": false,
+  "message": "hourlyRate must be a finite positive number.",
+  "code": "VALIDATION_ERROR",
+  "details": null
+}
+```
+
+Missing or invalid sessions return HTTP 401 with `code: "UNAUTHENTICATED"`.
+If BetterAuth is disabled, the endpoint returns HTTP 503 with
+`code: "AUTH_NOT_CONFIGURED"`. If MongoDB is unavailable after authentication,
+it returns HTTP 503 with `code: "DATABASE_NOT_READY"`. Database errors use the
+standard generic HTTP 500 response without MongoDB internals.
+
+The created studio can be fetched immediately with
+`GET /api/studios/<slug>` or `GET /api/studios/<id>`, and also appears in
+`GET /api/studios`.
 
 ## Project boundaries and roadmap
 
@@ -227,6 +318,6 @@ its own package manifest, lockfile, environment, Git history, and deployment.
 No client files or shared imports belong in this repository. Future client
 integration will use a configurable HTTP API base URL.
 
-Studio create/update/delete, reviews, and booking APIs remain future
-milestones. The separately maintained client is not modified by server auth
-work.
+Studio update/delete, reviews, and booking APIs remain future milestones. The
+separately maintained client is not modified by server authentication or studio
+creation work.

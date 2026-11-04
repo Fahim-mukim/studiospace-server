@@ -15,12 +15,36 @@ import {
 } from "./src/config/database.js";
 import { ObjectId } from "mongodb";
 
-const categorySlugs = new Set([
-  "photo-studios",
-  "sound-stages",
-  "podcast-rooms",
-  "music-suites",
-  "art-workshops",
+const studioCategories = {
+  "photo-studios": "Photo Studios",
+  "sound-stages": "Sound Stages",
+  "podcast-rooms": "Podcast Rooms",
+  "music-suites": "Music Suites",
+  "art-workshops": "Art Workshops",
+};
+const categorySlugs = new Set(Object.keys(studioCategories));
+const studioInputFields = new Set([
+  "title",
+  "categorySlug",
+  "hourlyRate",
+  "securityDeposit",
+  "capacity",
+  "location",
+  "image",
+  "imageAlt",
+  "amenities",
+  "overview",
+  "category",
+  "slug",
+  "_id",
+  "ownerId",
+  "ownerEmail",
+  "ownerName",
+  "host",
+  "createdAt",
+  "updatedAt",
+  "rating",
+  "reviewCount",
 ]);
 const allowedSorts = new Set(["newest", "price-low", "price-high"]);
 const publicStudioFields = [
@@ -160,7 +184,7 @@ export function registerAuthHandler(app, auth) {
   app.all("/api/auth/*splat", handler);
 }
 
-export function requireAuth(auth) {
+export function requireAuth(auth, { getDatabaseStatus } = {}) {
   return async (request, response, next) => {
     if (!auth) {
       return response.status(503).json({
@@ -188,6 +212,14 @@ export function requireAuth(auth) {
       request.user = session.user;
       return next();
     } catch (error) {
+      if (getDatabaseStatus && getDatabaseStatus() !== "connected") {
+        return response.status(503).json({
+          success: false,
+          message: "Database is not available",
+          code: "DATABASE_NOT_READY",
+          details: null,
+        });
+      }
       return next(error);
     }
   };
@@ -311,7 +343,220 @@ function serializeStudio(studio) {
   return serialized;
 }
 
-export function registerStudioRoutes(app, { getDatabase: resolveDatabase }) {
+function studioValidationError(message) {
+  const error = new Error(message);
+  error.code = "VALIDATION_ERROR";
+  error.safeMessage = message;
+  return error;
+}
+
+function requiredTrimmedString(value, name, minimumLength, maximumLength) {
+  if (typeof value !== "string") {
+    throw studioValidationError(`${name} must be a string.`);
+  }
+  const trimmed = value.trim();
+  if (trimmed.length < minimumLength || trimmed.length > maximumLength) {
+    throw studioValidationError(
+      `${name} must be between ${minimumLength} and ${maximumLength} characters.`,
+    );
+  }
+  return trimmed;
+}
+
+function parseStudioInput(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw studioValidationError("The request body must be a JSON object.");
+  }
+
+  const unexpectedField = Object.keys(body).find(
+    (field) => !studioInputFields.has(field),
+  );
+  if (unexpectedField) {
+    throw studioValidationError("The request includes an unsupported field.");
+  }
+
+  const title = requiredTrimmedString(body.title, "title", 3, 100);
+  if (
+    typeof body.categorySlug !== "string" ||
+    !Object.hasOwn(studioCategories, body.categorySlug)
+  ) {
+    throw studioValidationError("categorySlug must be a supported studio category.");
+  }
+  if (
+    typeof body.hourlyRate !== "number" ||
+    !Number.isFinite(body.hourlyRate) ||
+    body.hourlyRate <= 0
+  ) {
+    throw studioValidationError("hourlyRate must be a finite positive number.");
+  }
+  if (
+    typeof body.securityDeposit !== "number" ||
+    !Number.isFinite(body.securityDeposit) ||
+    body.securityDeposit < 0
+  ) {
+    throw studioValidationError(
+      "securityDeposit must be a finite non-negative number.",
+    );
+  }
+  if (
+    typeof body.capacity !== "number" ||
+    !Number.isSafeInteger(body.capacity) ||
+    body.capacity < 1
+  ) {
+    throw studioValidationError("capacity must be a positive integer.");
+  }
+
+  const location = requiredTrimmedString(body.location, "location", 2, 160);
+  if (typeof body.image !== "string" || body.image.trim().length > 2048) {
+    throw studioValidationError("image must be a valid HTTP(S) URL.");
+  }
+  const image = body.image.trim();
+  let parsedImage;
+  try {
+    parsedImage = new URL(image);
+  } catch {
+    throw studioValidationError("image must be a valid HTTP(S) URL.");
+  }
+  if (!["http:", "https:"].includes(parsedImage.protocol)) {
+    throw studioValidationError("image must be a valid HTTP(S) URL.");
+  }
+
+  let imageAlt = "";
+  if (body.imageAlt !== undefined) {
+    if (typeof body.imageAlt !== "string") {
+      throw studioValidationError("imageAlt must be a string.");
+    }
+    imageAlt = body.imageAlt.trim();
+    if (imageAlt.length > 250) {
+      throw studioValidationError("imageAlt must be 250 characters or fewer.");
+    }
+  }
+
+  if (
+    !Array.isArray(body.amenities) ||
+    body.amenities.length < 1 ||
+    body.amenities.length > 20
+  ) {
+    throw studioValidationError("amenities must be an array of 1 to 20 strings.");
+  }
+  const amenities = [];
+  const seenAmenities = new Set();
+  for (const amenity of body.amenities) {
+    if (typeof amenity !== "string") {
+      throw studioValidationError("Each amenity must be a string.");
+    }
+    const trimmed = amenity.trim();
+    if (!trimmed || trimmed.length > 80) {
+      throw studioValidationError(
+        "Each amenity must contain 1 to 80 non-whitespace characters.",
+      );
+    }
+    const normalized = trimmed.toLocaleLowerCase("en-US");
+    if (!seenAmenities.has(normalized)) {
+      seenAmenities.add(normalized);
+      amenities.push(trimmed);
+    }
+  }
+
+  const overview = requiredTrimmedString(body.overview, "overview", 30, 2000);
+
+  return {
+    title,
+    categorySlug: body.categorySlug,
+    category: studioCategories[body.categorySlug],
+    hourlyRate: body.hourlyRate,
+    securityDeposit: body.securityDeposit,
+    capacity: body.capacity,
+    location,
+    image,
+    imageAlt,
+    amenities,
+    overview,
+  };
+}
+
+function createStudioSlug(title, id) {
+  const titleSlug = title
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${titleSlug || "studio"}-${id.toHexString()}`;
+}
+
+export function registerStudioRoutes(
+  app,
+  {
+    getDatabase: resolveDatabase,
+    getDatabaseStatus = () => "connected",
+    auth = null,
+  },
+) {
+  app.post(
+    "/api/studios",
+    requireAuth(auth, { getDatabaseStatus }),
+    async (request, response) => {
+      const db = resolveDatabase();
+      if (!db) {
+        return response.status(503).json({
+          success: false,
+          message: "Database is not available",
+          code: "DATABASE_NOT_READY",
+          details: null,
+        });
+      }
+
+      const user = request.user;
+      const ownerEmail =
+        typeof user.email === "string" ? user.email.trim().toLowerCase() : "";
+      const ownerName = typeof user.name === "string" ? user.name.trim() : "";
+      if (
+        typeof user.id !== "string" ||
+        !user.id.trim() ||
+        !ownerEmail ||
+        !ownerName
+      ) {
+        return response.status(401).json({
+          success: false,
+          message: "Authenticated user must have an ID, email, and name",
+          code: "AUTH_USER_INCOMPLETE",
+          details: null,
+        });
+      }
+
+      const input = parseStudioInput(request.body);
+      const id = new ObjectId();
+      const now = new Date();
+      const host = {
+        name: ownerName,
+        ...(typeof user.image === "string" && user.image.trim()
+          ? { avatar: user.image.trim() }
+          : {}),
+      };
+      const studio = {
+        _id: id,
+        ...input,
+        slug: createStudioSlug(input.title, id),
+        ownerId: user.id,
+        ownerEmail,
+        ownerName,
+        host,
+        createdAt: now,
+        updatedAt: now,
+        reviewCount: 0,
+      };
+
+      await db.collection("studios").insertOne(studio);
+
+      return response.status(201).json({
+        success: true,
+        message: "Studio created successfully",
+        data: serializeStudio(studio),
+      });
+    },
+  );
+
   app.get("/api/studios", async (request, response) => {
     const db = resolveDatabase();
     if (!db) {
@@ -468,7 +713,11 @@ export async function startServer() {
     registerAuthHandler: (expressApp) =>
       registerAuthHandler(expressApp, auth),
     registerRoutes: (expressApp) =>
-      registerStudioRoutes(expressApp, { getDatabase }),
+      registerStudioRoutes(expressApp, {
+        getDatabase,
+        getDatabaseStatus,
+        auth,
+      }),
   });
   const server = await new Promise((resolve, reject) => {
     const httpServer = app.listen(config.port);
