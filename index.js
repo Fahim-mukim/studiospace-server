@@ -414,6 +414,63 @@ export function registerStudioRoutes(
     },
   );
 
+  app.get("/api/studios/mine", authenticate, async (request, response) => {
+    const db = resolveDatabase();
+    if (!db) {
+      return response.status(503).json({
+        success: false,
+        message: "Database is not available",
+        code: "DATABASE_NOT_READY",
+        details: null,
+      });
+    }
+
+    const user = request.user;
+    if (!user || typeof user !== "object") {
+      return response.status(401).json({
+        success: false,
+        message: "Authentication is required",
+        code: "UNAUTHENTICATED",
+        details: null,
+      });
+    }
+    const ownerId = typeof user.id === "string" ? user.id.trim() : "";
+    if (!ownerId) {
+      return response.status(401).json({
+        success: false,
+        message: "Authenticated user must have an ID, email, and name",
+        code: "AUTH_USER_INCOMPLETE",
+        details: null,
+      });
+    }
+
+    const collection = db.collection("studios");
+    const studios = await collection
+      .find(
+        { ownerId },
+        {
+          projection: Object.fromEntries([
+            ["_id", 1],
+            ...publicStudioFields.map((field) => [field, 1]),
+            ["host.name", 1],
+            ["host.displayName", 1],
+            ["host.avatar", 1],
+            ["host.profileImage", 1],
+            ["host.bio", 1],
+            ["ownerId", 1],
+          ]),
+        },
+      )
+      .sort({ createdAt: -1, _id: -1 })
+      .toArray();
+
+    return response.status(200).json({
+      success: true,
+      message: "Your studios retrieved successfully",
+      data: studios.map(serializeStudio),
+    });
+  });
+
   app.get("/api/studios", async (request, response) => {
     const db = resolveDatabase();
     if (!db) {
@@ -500,6 +557,439 @@ export function registerStudioRoutes(
       success: true,
       message: "Studio retrieved successfully",
       data: serializeStudio(studio),
+    });
+  });
+
+  app.patch(
+    "/api/studios/:id",
+    authenticate,
+    async (request, response) => {
+      const db = resolveDatabase();
+      if (!db) {
+        return response.status(503).json({
+          success: false,
+          message: "Database is not available",
+          code: "DATABASE_NOT_READY",
+          details: null,
+        });
+      }
+
+      const user = request.user;
+      if (!user || typeof user !== "object") {
+        return response.status(401).json({
+          success: false,
+          message: "Authentication is required",
+          code: "UNAUTHENTICATED",
+          details: null,
+        });
+      }
+      const ownerId = typeof user.id === "string" ? user.id.trim() : "";
+      if (!ownerId) {
+        return response.status(401).json({
+          success: false,
+          message: "Authenticated user must have an ID, email, and name",
+          code: "AUTH_USER_INCOMPLETE",
+          details: null,
+        });
+      }
+
+      const { id } = request.params;
+      const lookup = /^[\da-f]{24}$/i.test(id)
+        ? { _id: new ObjectId(id) }
+        : { slug: id };
+      const existing = await db.collection("studios").findOne(lookup);
+      if (!existing) {
+        return response.status(404).json({
+          success: false,
+          message: "Studio not found",
+          code: "STUDIO_NOT_FOUND",
+          details: null,
+        });
+      }
+      if (existing.ownerId !== ownerId) {
+        return response.status(403).json({
+          success: false,
+          message: "You do not have permission to update this studio",
+          code: "FORBIDDEN",
+          details: null,
+        });
+      }
+
+      if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) {
+        throw studioValidationError("The request body must be a JSON object.");
+      }
+
+      const unexpectedField = Object.keys(request.body).find(
+        (field) => !studioInputFields.has(field),
+      );
+      if (unexpectedField) {
+        throw studioValidationError("The request includes an unsupported field.");
+      }
+
+      const updates = {};
+      const now = new Date();
+
+      if (Object.hasOwn(request.body, "title")) {
+        updates.title = requiredTrimmedString(request.body.title, "title", 3, 100);
+      }
+      if (Object.hasOwn(request.body, "categorySlug")) {
+        if (
+          typeof request.body.categorySlug !== "string" ||
+          !Object.hasOwn(studioCategories, request.body.categorySlug)
+        ) {
+          throw studioValidationError("categorySlug must be a supported studio category.");
+        }
+        updates.categorySlug = request.body.categorySlug;
+        updates.category = studioCategories[request.body.categorySlug];
+      }
+      if (Object.hasOwn(request.body, "hourlyRate")) {
+        if (
+          typeof request.body.hourlyRate !== "number" ||
+          !Number.isFinite(request.body.hourlyRate) ||
+          request.body.hourlyRate <= 0
+        ) {
+          throw studioValidationError("hourlyRate must be a finite positive number.");
+        }
+        updates.hourlyRate = request.body.hourlyRate;
+      }
+      if (Object.hasOwn(request.body, "securityDeposit")) {
+        if (
+          typeof request.body.securityDeposit !== "number" ||
+          !Number.isFinite(request.body.securityDeposit) ||
+          request.body.securityDeposit < 0
+        ) {
+          throw studioValidationError(
+            "securityDeposit must be a finite non-negative number.",
+          );
+        }
+        updates.securityDeposit = request.body.securityDeposit;
+      }
+      if (Object.hasOwn(request.body, "capacity")) {
+        if (
+          typeof request.body.capacity !== "number" ||
+          !Number.isSafeInteger(request.body.capacity) ||
+          request.body.capacity < 1
+        ) {
+          throw studioValidationError("capacity must be a positive integer.");
+        }
+        updates.capacity = request.body.capacity;
+      }
+      if (Object.hasOwn(request.body, "location")) {
+        updates.location = requiredTrimmedString(request.body.location, "location", 2, 160);
+      }
+      if (Object.hasOwn(request.body, "image")) {
+        if (typeof request.body.image !== "string" || request.body.image.trim().length > 2048) {
+          throw studioValidationError("image must be a valid HTTP(S) URL.");
+        }
+        const image = request.body.image.trim();
+        let parsedImage;
+        try {
+          parsedImage = new URL(image);
+        } catch {
+          throw studioValidationError("image must be a valid HTTP(S) URL.");
+        }
+        if (!["http:", "https:"].includes(parsedImage.protocol)) {
+          throw studioValidationError("image must be a valid HTTP(S) URL.");
+        }
+        updates.image = image;
+      }
+      if (Object.hasOwn(request.body, "imageAlt")) {
+        if (request.body.imageAlt === null || request.body.imageAlt === "") {
+          updates.imageAlt = "";
+        } else if (typeof request.body.imageAlt !== "string") {
+          throw studioValidationError("imageAlt must be a string.");
+        } else {
+          const imageAlt = request.body.imageAlt.trim();
+          if (imageAlt.length > 250) {
+            throw studioValidationError("imageAlt must be 250 characters or fewer.");
+          }
+          updates.imageAlt = imageAlt;
+        }
+      }
+      if (Object.hasOwn(request.body, "amenities")) {
+        if (
+          !Array.isArray(request.body.amenities) ||
+          request.body.amenities.length < 1 ||
+          request.body.amenities.length > 20
+        ) {
+          throw studioValidationError("amenities must be an array of 1 to 20 strings.");
+        }
+        const amenities = [];
+        const seenAmenities = new Set();
+        for (const amenity of request.body.amenities) {
+          if (typeof amenity !== "string") {
+            throw studioValidationError("Each amenity must be a string.");
+          }
+          const trimmed = amenity.trim();
+          if (!trimmed || trimmed.length > 80) {
+            throw studioValidationError(
+              "Each amenity must contain 1 to 80 non-whitespace characters.",
+            );
+          }
+          const normalized = trimmed.toLocaleLowerCase("en-US");
+          if (!seenAmenities.has(normalized)) {
+            seenAmenities.add(normalized);
+            amenities.push(trimmed);
+          }
+        }
+        updates.amenities = amenities;
+      }
+      if (Object.hasOwn(request.body, "overview")) {
+        updates.overview = requiredTrimmedString(request.body.overview, "overview", 30, 2000);
+      }
+
+      if (Object.keys(updates).length === 0) {
+        throw studioValidationError("At least one editable field must be provided.");
+      }
+
+      updates.updatedAt = now;
+
+      await db.collection("studios").updateOne({ _id: existing._id }, { $set: updates });
+
+      const updated = await db.collection("studios").findOne({ _id: existing._id });
+      return response.status(200).json({
+        success: true,
+        message: "Studio updated successfully",
+        data: serializeStudio(updated),
+      });
+    },
+  );
+
+  app.post("/api/bookings", authenticate, async (request, response) => {
+    const db = resolveDatabase();
+    if (!db) {
+      return response.status(503).json({
+        success: false,
+        message: "Database is not available",
+        code: "DATABASE_NOT_READY",
+        details: null,
+      });
+    }
+
+    const user = request.user;
+    if (!user || typeof user !== "object") {
+      return response.status(401).json({
+        success: false,
+        message: "Authentication is required",
+        code: "UNAUTHENTICATED",
+        details: null,
+      });
+    }
+    const userId = typeof user.id === "string" ? user.id.trim() : "";
+    const userEmail = typeof user.email === "string" ? user.email.trim().toLowerCase() : "";
+    const userName = typeof user.name === "string" ? user.name.trim() : "";
+    if (!userId || !userEmail || !userName) {
+      return response.status(401).json({
+        success: false,
+        message: "Authenticated user must have an ID, email, and name",
+        code: "AUTH_USER_INCOMPLETE",
+        details: null,
+      });
+    }
+
+    const body = request.body || {};
+    const { studioId, bookingDate, startTime, endTime } = body;
+
+    if (!studioId || typeof studioId !== "string") {
+      throw studioValidationError("studioId is required.");
+    }
+
+    const lookup = /^[\da-f]{24}$/i.test(studioId)
+      ? { _id: new ObjectId(studioId) }
+      : { slug: studioId };
+    const studio = await db.collection("studios").findOne(lookup);
+    if (!studio) {
+      return response.status(404).json({
+        success: false,
+        message: "Studio not found",
+        code: "STUDIO_NOT_FOUND",
+        details: null,
+      });
+    }
+
+    if (!bookingDate || typeof bookingDate !== "string") {
+      throw studioValidationError("bookingDate is required.");
+    }
+    if (!startTime || typeof startTime !== "string" || !endTime || typeof endTime !== "string") {
+      throw studioValidationError("startTime and endTime are required.");
+    }
+
+    const startDateTime = new Date(`${bookingDate}T${startTime}`);
+    const endDateTime = new Date(`${bookingDate}T${endTime}`);
+    if (Number.isNaN(startDateTime.getTime()) || Number.isNaN(endDateTime.getTime())) {
+      throw studioValidationError("Invalid date or time.");
+    }
+    if (startDateTime < new Date(Date.now() - 60 * 1000)) {
+      throw studioValidationError("Date cannot be in the past.");
+    }
+    if (endDateTime <= startDateTime) {
+      throw studioValidationError("End time must be after start time.");
+    }
+
+    const durationMs = endDateTime.getTime() - startDateTime.getTime();
+    const durationHours = durationMs / (1000 * 60 * 60);
+    if (durationHours <= 0 || durationHours > 24) {
+      throw studioValidationError("Invalid booking duration.");
+    }
+
+    // Check for overlapping confirmed bookings
+    const overlapping = await db.collection("bookings").findOne({
+      studioId: String(studio._id),
+      status: "Confirmed",
+      $or: [
+        {
+          startAt: { $lt: endDateTime },
+          endAt: { $gt: startDateTime },
+        },
+      ],
+    });
+    if (overlapping) {
+      return response.status(409).json({
+        success: false,
+        message: "This time slot is not available.",
+        code: "BOOKING_CONFLICT",
+        details: null,
+      });
+    }
+
+    const hourlyRateSnapshot = typeof studio.hourlyRate === "number" ? studio.hourlyRate : Number(studio.hourlyRate) || 0;
+    const totalAmount = Math.round(hourlyRateSnapshot * durationHours * 100) / 100;
+
+    const now = new Date();
+    const booking = {
+      _id: new ObjectId(),
+      studioId: String(studio._id),
+      studioSlug: studio.slug,
+      studioTitle: studio.title,
+      studioImage: studio.image,
+      studioLocation: studio.location,
+      userId,
+      userEmail,
+      userName,
+      bookingDate,
+      startTime,
+      endTime,
+      startAt: startDateTime,
+      endAt: endDateTime,
+      duration: durationHours,
+      hourlyRateSnapshot,
+      totalAmount,
+      status: "Pending",
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await db.collection("bookings").insertOne(booking);
+
+    return response.status(201).json({
+      success: true,
+      message: "Booking request submitted",
+      data: {
+        id: String(booking._id),
+        ...booking,
+        _id: undefined,
+      },
+    });
+  });
+
+  app.get("/api/bookings/mine", authenticate, async (request, response) => {
+    const db = resolveDatabase();
+    if (!db) {
+      return response.status(503).json({
+        success: false,
+        message: "Database is not available",
+        code: "DATABASE_NOT_READY",
+        details: null,
+      });
+    }
+    const user = request.user;
+    const userId = typeof user?.id === "string" ? user.id.trim() : "";
+    if (!userId) {
+      return response.status(401).json({
+        success: false,
+        message: "Authentication is required",
+        code: "UNAUTHENTICATED",
+        details: null,
+      });
+    }
+    const bookings = await db
+      .collection("bookings")
+      .find({ userId })
+      .sort({ createdAt: -1 })
+      .toArray();
+    return response.status(200).json({
+      success: true,
+      message: "Bookings retrieved successfully",
+      data: bookings.map((b) => ({ id: String(b._id), ...b, _id: undefined })),
+    });
+  });
+
+  app.patch("/api/bookings/:id/cancel", authenticate, async (request, response) => {
+    const db = resolveDatabase();
+    if (!db) {
+      return response.status(503).json({
+        success: false,
+        message: "Database is not available",
+        code: "DATABASE_NOT_READY",
+        details: null,
+      });
+    }
+    const user = request.user;
+    const userId = typeof user?.id === "string" ? user.id.trim() : "";
+    if (!userId) {
+      return response.status(401).json({
+        success: false,
+        message: "Authentication is required",
+        code: "UNAUTHENTICATED",
+        details: null,
+      });
+    }
+    const { id } = request.params;
+    let bookingId;
+    try {
+      bookingId = new ObjectId(id);
+    } catch {
+      return response.status(404).json({
+        success: false,
+        message: "Booking not found",
+        code: "BOOKING_NOT_FOUND",
+        details: null,
+      });
+    }
+    const booking = await db.collection("bookings").findOne({ _id: bookingId });
+    if (!booking) {
+      return response.status(404).json({
+        success: false,
+        message: "Booking not found",
+        code: "BOOKING_NOT_FOUND",
+        details: null,
+      });
+    }
+    if (booking.userId !== userId) {
+      return response.status(403).json({
+        success: false,
+        message: "You do not have permission to cancel this booking",
+        code: "FORBIDDEN",
+        details: null,
+      });
+    }
+    if (booking.status !== "Pending") {
+      return response.status(400).json({
+        success: false,
+        message: "Only pending bookings can be cancelled",
+        code: "INVALID_BOOKING_STATUS",
+        details: null,
+      });
+    }
+    await db.collection("bookings").updateOne(
+      { _id: bookingId },
+      { $set: { status: "Cancelled", updatedAt: new Date() } },
+    );
+    const updated = await db.collection("bookings").findOne({ _id: bookingId });
+    return response.status(200).json({
+      success: true,
+      message: "Booking cancelled successfully",
+      data: { id: String(updated._id), ...updated, _id: undefined },
     });
   });
 }

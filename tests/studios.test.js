@@ -71,8 +71,16 @@ function createMockDatabase({
       calls.countFilter = filter;
       return total;
     },
-    find(filter, options) {
+    find(filter = {}, options) {
       calls.find = { filter, options };
+      let result = records.filter((record) => {
+        if (!filter || typeof filter !== "object") return true;
+        for (const [key, value] of Object.entries(filter)) {
+          if (key === "$or") continue;
+          if (record[key] !== value) return false;
+        }
+        return true;
+      });
       return {
         sort(value) {
           calls.sort = value;
@@ -87,19 +95,33 @@ function createMockDatabase({
           return this;
         },
         async toArray() {
-          return records;
+          return result;
         },
       };
     },
     async findOne(filter, options) {
       calls.findOne = { filter, options };
+      if (detail !== undefined) {
+        if (filter?._id && detail._id && !detail._id.equals(filter._id) && typeof filter._id === "object") {
+          // fall through
+        } else if (detail !== null) {
+          // if it's a specific detail for findOne calls, return it when appropriate? existing behavior
+        }
+        // For compatibility with existing tests, if detail is set and we need to be flexible
+      }
+      if (filter?._id) {
+        const found = records.find((record) => record._id.equals(filter._id));
+        if (found) return found;
+        if (detail !== undefined) return detail;
+        return null;
+      }
+      if (filter?.slug) {
+        const found = records.find((record) => record.slug === filter.slug);
+        if (found) return found;
+        if (detail !== undefined && detail?.slug === filter.slug) return detail;
+        return null;
+      }
       if (detail !== undefined) return detail;
-      if (filter._id) {
-        return records.find((record) => record._id.equals(filter._id)) ?? null;
-      }
-      if (filter.slug) {
-        return records.find((record) => record.slug === filter.slug) ?? null;
-      }
       return records[0] ?? null;
     },
     async insertOne(document) {
@@ -107,6 +129,21 @@ function createMockDatabase({
       if (insertError) throw insertError;
       records.push(document);
       return { acknowledged: true, insertedId: document._id };
+    },
+    async updateOne(filter, update) {
+      calls.updateOne = { filter, update };
+      let record = null;
+      if (filter?._id) {
+        record = records.find((r) => r._id.equals(filter._id));
+      } else if (filter?.slug) {
+        record = records.find((r) => r.slug === filter.slug);
+      } else if (records[0]) {
+        record = records[0];
+      }
+      if (record && update?.$set) {
+        Object.assign(record, update.$set);
+      }
+      return { acknowledged: true, modifiedCount: record ? 1 : 0 };
     },
   };
 
@@ -715,5 +752,183 @@ test("studio endpoints return 503 when no database is available", async () => {
       code: "DATABASE_NOT_READY",
       details: null,
     });
+  });
+});
+
+test("GET /api/studios/mine rejects unauthenticated access", async () => {
+  await withServer(
+    createMockDatabase(),
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/studios/mine`);
+      assert.equal(response.status, 401);
+      assert.deepEqual(await response.json(), {
+        success: false,
+        message: "Authentication is required",
+        code: "UNAUTHENTICATED",
+        details: null,
+      });
+    },
+    {
+      authenticate: (_request, response) => {
+        response.status(401).json({
+          success: false,
+          message: "Authentication is required",
+          code: "UNAUTHENTICATED",
+          details: null,
+        });
+      },
+    },
+  );
+});
+
+test("GET /api/studios/mine returns only studios owned by the authenticated user", async () => {
+  const ownerRecord = {
+    ...baseRecord(),
+    _id: new ObjectId("65c7a6b0c9d2fddc4493e002"),
+    ownerId: "better-auth-user-123",
+    slug: "my-studio",
+  };
+  const otherRecord = {
+    ...baseRecord(),
+    _id: new ObjectId("65c7a6b0c9d2fddc4493e003"),
+    ownerId: "different-user-456",
+    slug: "other-studio",
+  };
+  const database = createMockDatabase({ records: [ownerRecord, otherRecord] });
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/mine`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.success, true);
+    assert.deepEqual(database.calls.find.filter, { ownerId: "better-auth-user-123" });
+    assert.equal(Array.isArray(body.data), true);
+    assert.equal(body.data.length, 1);
+    assert.equal(body.data[0].id, String(ownerRecord._id));
+    assert.equal(body.data[0].slug, ownerRecord.slug);
+  });
+});
+
+test("GET /api/studios/mine does not expose another user's studios", async () => {
+  const otherRecord = {
+    ...baseRecord(),
+    _id: new ObjectId("65c7a6b0c9d2fddc4493e004"),
+    ownerId: "another-user-999",
+  };
+  const database = createMockDatabase({ records: [otherRecord] });
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/mine`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.data.length, 0);
+  });
+});
+
+test("GET /api/studios/mine returns empty array when owner has no studios", async () => {
+  const database = createMockDatabase({ records: [] });
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/mine`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.success, true);
+    assert.deepEqual(body.data, []);
+  });
+});
+
+test("PATCH /api/studios/:id rejects unauthenticated update", async () => {
+  const record = baseRecord();
+  record.ownerId = "better-auth-user-123";
+  const database = createMockDatabase({ records: [record] });
+  await withServer(
+    database,
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Updated Title" }),
+      });
+      assert.equal(response.status, 401);
+    },
+    {
+      authenticate: (_request, response) => {
+        response.status(401).json({
+          success: false,
+          message: "Authentication is required",
+          code: "UNAUTHENTICATED",
+          details: null,
+        });
+      },
+    },
+  );
+});
+
+test("PATCH /api/studios/:id allows owner to update their studio", async () => {
+  const record = baseRecord();
+  record.ownerId = "better-auth-user-123";
+  const database = createMockDatabase({ records: [record] });
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Updated Studio Name" }),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.success, true);
+    assert.equal(body.data.title, "Updated Studio Name");
+    assert.equal(record.title, "Updated Studio Name");
+  });
+});
+
+test("PATCH /api/studios/:id rejects non-owner updates", async () => {
+  const record = baseRecord();
+  record.ownerId = "owner-123";
+  const database = createMockDatabase({ records: [record] });
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Hacked Title" }),
+    });
+    assert.equal(response.status, 403);
+  });
+});
+
+test("PATCH /api/studios/:id returns 404 for missing studio", async () => {
+  const database = createMockDatabase({ records: [] });
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/65c7a6b0c9d2fddc4493e999`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Updated Title" }),
+    });
+    assert.equal(response.status, 404);
+  });
+});
+
+test("PATCH /api/studios/:id rejects invalid fields", async () => {
+  const record = baseRecord();
+  record.ownerId = "better-auth-user-123";
+  const database = createMockDatabase({ records: [record] });
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "ab" }),
+    });
+    assert.equal(response.status, 400);
+  });
+});
+
+test("PATCH /api/studios/:id prevents changing protected ownership fields", async () => {
+  const record = baseRecord();
+  record.ownerId = "better-auth-user-123";
+  const database = createMockDatabase({ records: [record] });
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ownerId: "hacker" }),
+    });
+    assert.equal(response.status, 400);
   });
 });

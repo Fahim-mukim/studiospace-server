@@ -10,7 +10,8 @@
     "dev": "nodemon index.js",
     "start": "node index.js",
     "test": "node --test",
-    "check": "node --check index.js && node --check src/app.js && node --check src/config/env.js && node --check src/config/database.js && node --check src/routes/health.routes.js && node --check src/middleware/not-found.js && node --check src/middleware/error-handler.js && node --check src/middleware/require-auth.js && node --check tests/auth.test.js && node --check tests/studios.test.js"
+    "check": "node --check index.js && node --check src/app.js && node --check src/config/env.js && node --check src/config/database.js && node --check src/routes/health.routes.js && node --check src/middleware/not-found.js && node --check src/middleware/error-handler.js && node --check src/middleware/require-auth.js && node --check tests/auth.test.js && node --check tests/studios.test.js",
+    "seed:studios": "node scripts/seed-studios.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
