@@ -14,6 +14,10 @@ export function getDatabase() {
   return database;
 }
 
+export function getMongoClient() {
+  return client;
+}
+
 export async function connectDatabase({ uri, databaseName }) {
   if (!uri) {
     databaseConfigured = false;

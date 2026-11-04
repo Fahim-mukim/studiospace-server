@@ -10,9 +10,10 @@
     "dev": "nodemon index.js",
     "start": "node index.js",
     "test": "node --test",
-    "check": "node --check index.js && node --check src/app.js && node --check src/config/env.js && node --check src/config/database.js && node --check src/routes/health.routes.js && node --check src/middleware/not-found.js && node --check src/middleware/error-handler.js"
+    "check": "node --check index.js && node --check src/app.js && node --check src/config/env.js && node --check src/config/database.js && node --check src/routes/health.routes.js && node --check src/middleware/not-found.js && node --check src/middleware/error-handler.js && node --check tests/auth.test.js"
   },
   "dependencies": {
+    "better-auth": "^1.7.16",
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",
     "express": "^5.3.0",

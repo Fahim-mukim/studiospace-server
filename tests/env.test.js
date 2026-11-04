@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { randomBytes } from "node:crypto";
 import { loadConfig } from "../src/config/env.js";
 
 test("development config includes its local client origin fallback", () => {
@@ -39,4 +40,63 @@ test("invalid port and non-origin client URLs are rejected", () => {
       }),
     /CLIENT_URL must contain valid HTTP\(S\) origins/,
   );
+});
+
+test("BetterAuth requires a high-entropy secret and server origin together", () => {
+  const secret = randomBytes(32).toString("base64url");
+  const config = loadConfig({
+    NODE_ENV: "development",
+    BETTER_AUTH_SECRET: secret,
+    BETTER_AUTH_URL: "http://localhost:5000",
+  });
+  assert.equal(config.authEnabled, true);
+  assert.equal(config.betterAuthUrl, "http://localhost:5000");
+
+  assert.throws(
+    () =>
+      loadConfig({
+        NODE_ENV: "development",
+        BETTER_AUTH_SECRET: "not-a-secure-secret",
+        BETTER_AUTH_URL: "http://localhost:5000",
+      }),
+    /BETTER_AUTH_SECRET must be at least 32 characters and have high entropy/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        NODE_ENV: "development",
+        BETTER_AUTH_SECRET: secret,
+      }),
+    /BETTER_AUTH_SECRET and BETTER_AUTH_URL must be configured together/,
+  );
+});
+
+test("BetterAuth URL and Google OAuth credentials are validated", () => {
+  const secret = randomBytes(32).toString("base64url");
+  assert.throws(
+    () =>
+      loadConfig({
+        NODE_ENV: "production",
+        BETTER_AUTH_SECRET: secret,
+        BETTER_AUTH_URL: "http://api.example.com",
+      }),
+    /BETTER_AUTH_URL must be a valid HTTP\(S\) server origin/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        NODE_ENV: "development",
+        GOOGLE_CLIENT_ID: "client-id",
+      }),
+    /GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be configured together/,
+  );
+
+  const config = loadConfig({
+    NODE_ENV: "development",
+    BETTER_AUTH_SECRET: secret,
+    BETTER_AUTH_URL: "http://localhost:5000",
+    GOOGLE_CLIENT_ID: "client-id",
+    GOOGLE_CLIENT_SECRET: "client-secret",
+  });
+  assert.equal(config.googleOauthEnabled, true);
 });

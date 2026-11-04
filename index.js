@@ -1,10 +1,16 @@
 import { pathToFileURL } from "node:url";
+import { betterAuth } from "better-auth";
+import { APIError, createAuthMiddleware } from "better-auth/api";
+import { mongodbAdapter } from "better-auth/adapters/mongodb";
+import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
+import { jwt } from "better-auth/plugins";
 import { createApp } from "./src/app.js";
 import { loadConfig } from "./src/config/env.js";
 import {
   closeDatabase,
   connectDatabase,
   getDatabase,
+  getMongoClient,
   getDatabaseStatus,
 } from "./src/config/database.js";
 import { ObjectId } from "mongodb";
@@ -38,6 +44,154 @@ const publicStudioFields = [
   "reviewCount",
 ];
 const publicHostFields = ["name", "displayName", "avatar", "profileImage", "bio"];
+
+export function validateSignUpInput(context) {
+  if (context.path !== "/sign-up/email") return;
+
+  const body = context.body ?? {};
+  const password = body.password;
+  if (
+    typeof password === "string" &&
+    (!/[a-z]/.test(password) || !/[A-Z]/.test(password))
+  ) {
+    throw new APIError("BAD_REQUEST", {
+      message: "Password must contain at least one lowercase and one uppercase letter.",
+    });
+  }
+
+  if (!Object.hasOwn(body, "photoURL")) return;
+  if (typeof body.photoURL !== "string") {
+    throw new APIError("BAD_REQUEST", {
+      message: "Photo URL must be a valid HTTP(S) URL.",
+    });
+  }
+
+  const photoURL = body.photoURL.trim();
+  if (photoURL) {
+    let parsedPhotoURL;
+    try {
+      parsedPhotoURL = new URL(photoURL);
+    } catch {
+      throw new APIError("BAD_REQUEST", {
+        message: "Photo URL must be a valid HTTP(S) URL.",
+      });
+    }
+    if (!["http:", "https:"].includes(parsedPhotoURL.protocol)) {
+      throw new APIError("BAD_REQUEST", {
+        message: "Photo URL must be a valid HTTP(S) URL.",
+      });
+    }
+  }
+
+  const signupBody = { ...body };
+  delete signupBody.photoURL;
+  return {
+    context: {
+      ...context,
+      body: {
+        ...signupBody,
+        ...(photoURL ? { image: photoURL } : {}),
+      },
+    },
+  };
+}
+
+export function buildBetterAuthOptions({ database, mongoClient, config }) {
+  return {
+    appName: "StudioSpace",
+    baseURL: config.betterAuthUrl,
+    secret: config.betterAuthSecret,
+    trustedOrigins: config.clientOrigins,
+    database: mongodbAdapter(database, {
+      client: mongoClient,
+      transaction: false,
+    }),
+    emailAndPassword: {
+      enabled: true,
+      autoSignIn: false,
+      minPasswordLength: 6,
+      maxPasswordLength: 128,
+    },
+    socialProviders: config.googleOauthEnabled
+      ? {
+          google: {
+            clientId: config.googleClientId,
+            clientSecret: config.googleClientSecret,
+          },
+        }
+      : {},
+    session: {
+      cookieCache: {
+        enabled: true,
+        maxAge: 60,
+        strategy: "jwt",
+      },
+    },
+    advanced: {
+      defaultCookieAttributes: {
+        httpOnly: true,
+        sameSite: "lax",
+        ...(config.nodeEnv === "production" ? { secure: true } : {}),
+      },
+    },
+    plugins: [jwt({ sessionCookieCache: true })],
+    hooks: {
+      before: createAuthMiddleware(validateSignUpInput),
+    },
+  };
+}
+
+export function createBetterAuth(dependencies) {
+  return betterAuth(buildBetterAuthOptions(dependencies));
+}
+
+export function registerAuthHandler(app, auth) {
+  const handler = auth
+    ? toNodeHandler(auth)
+    : (_request, response) =>
+        response.status(503).json({
+          success: false,
+          message: "Authentication is not configured",
+          code: "AUTH_NOT_CONFIGURED",
+          details: null,
+        });
+
+  app.all("/api/auth", handler);
+  app.all("/api/auth/*splat", handler);
+}
+
+export function requireAuth(auth) {
+  return async (request, response, next) => {
+    if (!auth) {
+      return response.status(503).json({
+        success: false,
+        message: "Authentication is not configured",
+        code: "AUTH_NOT_CONFIGURED",
+        details: null,
+      });
+    }
+
+    try {
+      const session = await auth.api.getSession({
+        headers: fromNodeHeaders(request.headers),
+      });
+      if (!session?.user) {
+        return response.status(401).json({
+          success: false,
+          message: "Authentication is required",
+          code: "UNAUTHENTICATED",
+          details: null,
+        });
+      }
+
+      request.authSession = session;
+      request.user = session.user;
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  };
+}
 
 function invalidQuery(message) {
   const error = new Error(message);
@@ -251,6 +405,21 @@ export function registerStudioRoutes(app, { getDatabase: resolveDatabase }) {
 export async function startServer() {
   const config = loadConfig();
 
+  if (config.nodeEnv === "production" && !config.authEnabled) {
+    throw new Error(
+      "BETTER_AUTH_SECRET and BETTER_AUTH_URL are required in production; the server was not started.",
+    );
+  }
+  if (
+    config.nodeEnv === "production" &&
+    config.authEnabled &&
+    config.clientOrigins.length === 0
+  ) {
+    throw new Error(
+      "CLIENT_URL is required in production when authentication is enabled.",
+    );
+  }
+
   if (config.nodeEnv === "production" && !config.mongodbUri) {
     throw new Error(
       "MONGODB_URI is required in production; the server was not started.",
@@ -275,9 +444,29 @@ export async function startServer() {
     );
   }
 
+  const auth = config.authEnabled && getDatabase()
+    ? createBetterAuth({
+        database: getDatabase(),
+        mongoClient: getMongoClient(),
+        config,
+      })
+    : null;
+
+  if (!config.authEnabled) {
+    console.warn(
+      "BetterAuth is not configured; authentication endpoints will return 503.",
+    );
+  } else if (!auth) {
+    console.warn(
+      "BetterAuth is disabled because MongoDB is not connected; authentication endpoints will return 503.",
+    );
+  }
+
   const app = createApp({
     clientOrigins: config.clientOrigins,
     getDatabaseStatus,
+    registerAuthHandler: (expressApp) =>
+      registerAuthHandler(expressApp, auth),
     registerRoutes: (expressApp) =>
       registerStudioRoutes(expressApp, { getDatabase }),
   });
