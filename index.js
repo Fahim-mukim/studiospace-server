@@ -68,11 +68,31 @@ const publicStudioFields = [
   "reviewCount",
 ];
 const publicHostFields = ["name", "displayName", "avatar", "profileImage", "bio"];
+const emailSignupFields = new Set([
+  "name",
+  "email",
+  "password",
+  "image",
+  "callbackURL",
+  "rememberMe",
+]);
 
 export function validateSignUpInput(context) {
   if (context.path !== "/sign-up/email") return;
 
   const body = context.body ?? {};
+  if (typeof body !== "object" || Array.isArray(body)) {
+    throw new APIError("BAD_REQUEST", {
+      message: "Signup body must be an object.",
+    });
+  }
+
+  if (Object.keys(body).some((field) => !emailSignupFields.has(field))) {
+    throw new APIError("BAD_REQUEST", {
+      message: "Signup contains unsupported fields.",
+    });
+  }
+
   const password = body.password;
   if (
     typeof password === "string" &&
@@ -83,39 +103,35 @@ export function validateSignUpInput(context) {
     });
   }
 
-  if (!Object.hasOwn(body, "photoURL")) return;
-  if (typeof body.photoURL !== "string") {
-    throw new APIError("BAD_REQUEST", {
-      message: "Photo URL must be a valid HTTP(S) URL.",
-    });
-  }
+  let normalizedBody = body;
+  if (Object.hasOwn(body, "image")) {
+    if (typeof body.image !== "string") {
+      throw new APIError("BAD_REQUEST", {
+        message: "Image must be a valid HTTP(S) URL.",
+      });
+    }
 
-  const photoURL = body.photoURL.trim();
-  if (photoURL) {
-    let parsedPhotoURL;
+    const image = body.image.trim();
+    let parsedImage;
     try {
-      parsedPhotoURL = new URL(photoURL);
+      parsedImage = new URL(image);
     } catch {
       throw new APIError("BAD_REQUEST", {
-        message: "Photo URL must be a valid HTTP(S) URL.",
+        message: "Image must be a valid HTTP(S) URL.",
       });
     }
-    if (!["http:", "https:"].includes(parsedPhotoURL.protocol)) {
+    if (!["http:", "https:"].includes(parsedImage.protocol)) {
       throw new APIError("BAD_REQUEST", {
-        message: "Photo URL must be a valid HTTP(S) URL.",
+        message: "Image must be a valid HTTP(S) URL.",
       });
     }
+    normalizedBody = { ...body, image };
   }
 
-  const signupBody = { ...body };
-  delete signupBody.photoURL;
   return {
     context: {
       ...context,
-      body: {
-        ...signupBody,
-        ...(photoURL ? { image: photoURL } : {}),
-      },
+      body: normalizedBody,
     },
   };
 }

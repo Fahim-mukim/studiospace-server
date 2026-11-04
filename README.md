@@ -77,12 +77,43 @@ Email/password authentication supports BetterAuth's standard endpoints:
 | Sign out | `POST /api/auth/sign-out` |
 | Current session | `GET /api/auth/get-session` |
 
-Registration requires at least six characters, including an uppercase and a
-lowercase letter. It does not automatically sign the user in. The optional
-`photoURL` registration field is validated as an HTTP(S) URL and mapped to
-BetterAuth's `image` user field. BetterAuth handles password hashing and
-session cookies; session tokens are not returned in JSON or stored in browser
-localStorage.
+Registration requires 6–128 characters, including an uppercase and a
+lowercase letter. The optional BetterAuth `image` field must be a valid
+HTTP(S) URL. The server rejects unsupported signup fields, including
+client-supplied server-managed user fields. BetterAuth hashes passwords and
+`autoSignIn: false` requires a separate explicit login after registration.
+
+With auto sign-in disabled, BetterAuth returns an intentionally
+indistinguishable success-shaped response for a duplicate email to reduce
+email enumeration. The client therefore reports that the signup request was
+received and asks the user to continue to sign in; it does not claim that a
+new database user was created.
+
+BetterAuth persists users, credential accounts (including password hashes),
+and sessions in the MongoDB `user`, `account`, and `session` collections.
+Session cookies are HTTP-only. The client does not persist passwords or
+session data in browser storage.
+
+### Opt-in MongoDB authentication integration test
+
+The normal test suite skips the live database integration test unless both
+`MONGODB_TEST_URI` and `MONGODB_TEST_DB_NAME` are explicitly set. The test
+never falls back to `MONGODB_URI`; the database name must clearly contain
+`test`. Use a dedicated test database, not the application database. For a
+local MongoDB test instance in PowerShell:
+
+```powershell
+$env:MONGODB_TEST_URI = "mongodb://127.0.0.1:27017"
+$env:MONGODB_TEST_DB_NAME = "studiospace_auth_test"
+npm test
+Remove-Item Env:MONGODB_TEST_URI
+Remove-Item Env:MONGODB_TEST_DB_NAME
+```
+
+The test uses a unique email, exercises the real HTTP BetterAuth handler and
+MongoDB adapter, and removes only the user, account, and session records
+created for that email. It does not drop the database or clear collections.
+Without both explicit variables, `npm test` prints a skip reason.
 
 Google OAuth is enabled only when both `GOOGLE_CLIENT_ID` and
 `GOOGLE_CLIENT_SECRET` are configured. For local API development, register

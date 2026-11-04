@@ -27,7 +27,7 @@ async function withServer(app, callback) {
   }
 }
 
-test("signup validates password case and maps Photo URL to the image field", () => {
+test("signup validates password case and normalizes its optional image field", () => {
   assert.throws(
     () =>
       validateSignUpInput({
@@ -49,26 +49,67 @@ test("signup validates password case and maps Photo URL to the image field", () 
     path: "/sign-up/email",
     body: {
       name: "Creator",
+      email: "creator@example.test",
       password: "CreatorPass1",
-      photoURL: " https://images.example/creator.jpg ",
+      image: " https://images.example/creator.jpg ",
+      callbackURL: "/login",
+      rememberMe: false,
     },
   });
   assert.deepEqual(result.context.body, {
     name: "Creator",
+    email: "creator@example.test",
     password: "CreatorPass1",
     image: "https://images.example/creator.jpg",
+    callbackURL: "/login",
+    rememberMe: false,
   });
+
+  assert.deepEqual(
+    validateSignUpInput({
+      path: "/sign-up/email",
+      body: { name: "Creator", password: "CreatorPass1" },
+    }).context.body,
+    { name: "Creator", password: "CreatorPass1" },
+  );
 });
 
-test("signup rejects non-HTTP photo URLs and leaves other auth endpoints untouched", () => {
+test("signup rejects invalid image URLs and client-supplied server fields", () => {
+  for (const image of [
+    "javascript:alert(1)",
+    "data:image/png;base64,abc",
+    "not a URL",
+    "http://[",
+    "",
+    null,
+  ]) {
+    assert.throws(
+      () =>
+        validateSignUpInput({
+          path: "/sign-up/email",
+          body: { password: "CreatorPass1", image },
+        }),
+      /Image must be a valid HTTP\(S\) URL/,
+    );
+  }
+
   assert.throws(
     () =>
       validateSignUpInput({
         path: "/sign-up/email",
-        body: { password: "CreatorPass1", photoURL: "javascript:alert(1)" },
+        body: { password: "CreatorPass1", photoURL: "https://example.test/a" },
       }),
-    /Photo URL must be a valid HTTP\(S\) URL/,
+    /Signup contains unsupported fields/,
   );
+  assert.throws(
+    () =>
+      validateSignUpInput({
+        path: "/sign-up/email",
+        body: { password: "CreatorPass1", role: "admin" },
+      }),
+    /Signup contains unsupported fields/,
+  );
+
   assert.equal(
     validateSignUpInput({
       path: "/sign-in/email",
@@ -98,6 +139,7 @@ test("BetterAuth options enable email auth, JWT cookie caching, and optional Goo
   assert.equal(options.emailAndPassword.enabled, true);
   assert.equal(options.emailAndPassword.autoSignIn, false);
   assert.equal(options.emailAndPassword.minPasswordLength, 6);
+  assert.equal(options.emailAndPassword.maxPasswordLength, 128);
   assert.deepEqual(options.session.cookieCache, {
     enabled: true,
     maxAge: 60,
