@@ -4,8 +4,249 @@ import { loadConfig } from "./src/config/env.js";
 import {
   closeDatabase,
   connectDatabase,
+  getDatabase,
   getDatabaseStatus,
 } from "./src/config/database.js";
+import { ObjectId } from "mongodb";
+
+const categorySlugs = new Set([
+  "photo-studios",
+  "sound-stages",
+  "podcast-rooms",
+  "music-suites",
+  "art-workshops",
+]);
+const allowedSorts = new Set(["newest", "price-low", "price-high"]);
+const publicStudioFields = [
+  "title",
+  "name",
+  "slug",
+  "category",
+  "categorySlug",
+  "hourlyRate",
+  "securityDeposit",
+  "capacity",
+  "location",
+  "city",
+  "image",
+  "imageAlt",
+  "images",
+  "amenities",
+  "overview",
+  "createdAt",
+  "rating",
+  "reviewCount",
+];
+const publicHostFields = ["name", "displayName", "avatar", "profileImage", "bio"];
+
+function invalidQuery(message) {
+  const error = new Error(message);
+  error.code = "INVALID_QUERY";
+  error.safeMessage = message;
+  return error;
+}
+
+function queryString(value, name) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw invalidQuery(`${name} must be a single string value.`);
+  }
+  return value;
+}
+
+function parseNonNegativeNumber(value, name) {
+  const input = queryString(value, name);
+  if (input === undefined) return undefined;
+  if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(input)) {
+    throw invalidQuery(`${name} must be a non-negative number.`);
+  }
+  const number = Number(input);
+  if (!Number.isFinite(number)) {
+    throw invalidQuery(`${name} must be a non-negative number.`);
+  }
+  return number;
+}
+
+function parsePositiveInteger(value, name, fallback, maximum = Infinity) {
+  const input = queryString(value, name);
+  if (input === undefined) return fallback;
+  if (!/^[1-9]\d*$/.test(input)) {
+    throw invalidQuery(`${name} must be a positive integer.`);
+  }
+  const number = Number(input);
+  if (!Number.isSafeInteger(number) || number > maximum) {
+    throw invalidQuery(`${name} must be between 1 and ${maximum}.`);
+  }
+  return number;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseStudioQuery(query) {
+  const category = queryString(query.category, "category");
+  if (category !== undefined && !categorySlugs.has(category)) {
+    throw invalidQuery("category must be a supported studio category slug.");
+  }
+
+  const search = queryString(query.search, "search");
+  if (search !== undefined && search.length > 100) {
+    throw invalidQuery("search must be 100 characters or fewer.");
+  }
+
+  const minPrice = parseNonNegativeNumber(query.minPrice, "minPrice");
+  const maxPrice = parseNonNegativeNumber(query.maxPrice, "maxPrice");
+  if (minPrice !== undefined && maxPrice !== undefined && minPrice > maxPrice) {
+    throw invalidQuery("minPrice cannot be greater than maxPrice.");
+  }
+
+  const limit = parsePositiveInteger(query.limit, "limit", 20, 100);
+  const page = parsePositiveInteger(
+    query.page,
+    "page",
+    1,
+    Math.floor(Number.MAX_SAFE_INTEGER / limit),
+  );
+  const sort = queryString(query.sort, "sort") ?? "newest";
+  if (!allowedSorts.has(sort)) {
+    throw invalidQuery("sort must be newest, price-low, or price-high.");
+  }
+
+  const filter = {};
+  if (category !== undefined) filter.categorySlug = category;
+  if (minPrice !== undefined || maxPrice !== undefined) {
+    filter.hourlyRate = {};
+    if (minPrice !== undefined) filter.hourlyRate.$gte = minPrice;
+    if (maxPrice !== undefined) filter.hourlyRate.$lte = maxPrice;
+  }
+  if (search?.trim()) {
+    const expression = new RegExp(escapeRegex(search.trim()), "i");
+    filter.$or = [
+      { title: expression },
+      { name: expression },
+      { location: expression },
+      { category: expression },
+      { overview: expression },
+      { amenities: expression },
+    ];
+  }
+
+  const sortOrder =
+    sort === "newest"
+      ? { createdAt: -1, _id: -1 }
+      : sort === "price-low"
+        ? { hourlyRate: 1, _id: 1 }
+        : { hourlyRate: -1, _id: 1 };
+
+  return { filter, page, limit, sortOrder };
+}
+
+function serializeStudio(studio) {
+  const serialized = { id: String(studio._id) };
+  for (const field of publicStudioFields) {
+    if (studio[field] !== undefined) serialized[field] = studio[field];
+  }
+  if (studio.host && typeof studio.host === "object") {
+    serialized.host = Object.fromEntries(
+      publicHostFields
+        .filter((field) => studio.host[field] !== undefined)
+        .map((field) => [field, studio.host[field]]),
+    );
+  }
+  return serialized;
+}
+
+export function registerStudioRoutes(app, { getDatabase: resolveDatabase }) {
+  app.get("/api/studios", async (request, response) => {
+    const db = resolveDatabase();
+    if (!db) {
+      return response.status(503).json({
+        success: false,
+        message: "Database is not available",
+        code: "DATABASE_NOT_READY",
+        details: null,
+      });
+    }
+
+    const { filter, page, limit, sortOrder } = parseStudioQuery(request.query);
+    const collection = db.collection("studios");
+    const [total, studios] = await Promise.all([
+      collection.countDocuments(filter),
+      collection
+        .find(filter, {
+          projection: Object.fromEntries([
+            ["_id", 1],
+            ...publicStudioFields.map((field) => [field, 1]),
+            ["host.name", 1],
+            ["host.displayName", 1],
+            ["host.avatar", 1],
+            ["host.profileImage", 1],
+            ["host.bio", 1],
+          ]),
+        })
+        .sort(sortOrder)
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .toArray(),
+    ]);
+
+    return response.status(200).json({
+      success: true,
+      message: "Studios retrieved successfully",
+      data: studios.map(serializeStudio),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  });
+
+  app.get("/api/studios/:id", async (request, response) => {
+    const db = resolveDatabase();
+    if (!db) {
+      return response.status(503).json({
+        success: false,
+        message: "Database is not available",
+        code: "DATABASE_NOT_READY",
+        details: null,
+      });
+    }
+
+    const { id } = request.params;
+    const lookup = /^[\da-f]{24}$/i.test(id)
+      ? { _id: new ObjectId(id) }
+      : { slug: id };
+    const studio = await db.collection("studios").findOne(lookup, {
+      projection: Object.fromEntries([
+        ["_id", 1],
+        ...publicStudioFields.map((field) => [field, 1]),
+        ["host.name", 1],
+        ["host.displayName", 1],
+        ["host.avatar", 1],
+        ["host.profileImage", 1],
+        ["host.bio", 1],
+      ]),
+    });
+
+    if (!studio) {
+      return response.status(404).json({
+        success: false,
+        message: "Studio not found",
+        code: "STUDIO_NOT_FOUND",
+        details: null,
+      });
+    }
+
+    return response.status(200).json({
+      success: true,
+      message: "Studio retrieved successfully",
+      data: serializeStudio(studio),
+    });
+  });
+}
 
 export async function startServer() {
   const config = loadConfig();
@@ -37,6 +278,8 @@ export async function startServer() {
   const app = createApp({
     clientOrigins: config.clientOrigins,
     getDatabaseStatus,
+    registerRoutes: (expressApp) =>
+      registerStudioRoutes(expressApp, { getDatabase }),
   });
   const server = await new Promise((resolve, reject) => {
     const httpServer = app.listen(config.port);

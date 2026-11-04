@@ -86,6 +86,81 @@ in-memory database fallback is used.
 - `GET /api/ready` is a readiness check. HTTP 200 means MongoDB connected and
   passed its startup ping; otherwise it returns HTTP 503.
 
+## Public studio read APIs
+
+Studio reads use the MongoDB `studios` collection through the shared database
+connection. They return stored database records only; the illustrative
+frontend fixtures are not copied into MongoDB or returned as fallback data.
+If MongoDB is unavailable, both routes return HTTP 503 with
+`DATABASE_NOT_READY`.
+
+### `GET /api/studios`
+
+Returns a paginated list. Supported query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `category` | One of `photo-studios`, `sound-stages`, `podcast-rooms`, `music-suites`, or `art-workshops` |
+| `search` | Case-insensitive search across title/name, location, category, overview, and amenities |
+| `minPrice`, `maxPrice` | Inclusive non-negative `hourlyRate` bounds |
+| `sort` | `newest` (default), `price-low`, or `price-high` |
+| `page` | Positive page number (default `1`) |
+| `limit` | Positive page size (default `20`, maximum `100`) |
+
+Example requests:
+
+```text
+GET http://localhost:5000/api/studios
+GET http://localhost:5000/api/studios?limit=6&sort=newest
+GET http://localhost:5000/api/studios?category=photo-studios&minPrice=50&maxPrice=120
+GET http://localhost:5000/api/studios?search=daylight&page=1&limit=10
+```
+
+Successful responses contain public studio fields with MongoDB `_id`
+serialized as the string `id`:
+
+```json
+{
+  "success": true,
+  "message": "Studios retrieved successfully",
+  "data": [],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 0,
+    "totalPages": 0
+  }
+}
+```
+
+Invalid filters return HTTP 400 with `code: "INVALID_QUERY"`. The endpoint
+uses database-side filtering, counting, sorting, and pagination; search input
+is escaped and sort values are allowlisted.
+
+### `GET /api/studios/:id`
+
+Looks up one studio by a 24-character MongoDB ObjectId or by its `slug`.
+
+```text
+GET http://localhost:5000/api/studios/65c7a6b0c9d2fddc4493e001
+GET http://localhost:5000/api/studios/daylight-photo-studio
+```
+
+Success returns HTTP 200 and a single serialized public studio in `data`.
+An unknown studio returns HTTP 404:
+
+```json
+{
+  "success": false,
+  "message": "Studio not found",
+  "code": "STUDIO_NOT_FOUND",
+  "details": null
+}
+```
+
+No studio create/update/delete, authentication, booking, or client API
+integration is included in this milestone.
+
 ## Project boundaries and roadmap
 
 This repository is independent of
