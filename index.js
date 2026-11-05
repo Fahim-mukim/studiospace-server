@@ -12,6 +12,7 @@ import {
   createRequireAuth,
   getRemoteJwksResolver,
 } from "./src/middleware/require-auth.js";
+import { ensureCollectionIndexes } from "./src/config/indexes.js";
 
 const studioCategories = {
   "photo-studios": "Photo Studios",
@@ -1010,8 +1011,9 @@ export async function startServer() {
   }
 
   if (config.mongodbUri) {
+    let database;
     try {
-      await connectDatabase({
+      database = await connectDatabase({
         uri: config.mongodbUri,
         databaseName: config.mongodbDbName,
       });
@@ -1019,6 +1021,25 @@ export async function startServer() {
     } catch {
       throw new Error(
         "MongoDB connection failed. Check MONGODB_URI, MONGODB_DB_NAME, network access, and credentials.",
+      );
+    }
+
+    // Index creation is a performance concern only, so it never affects startup.
+    try {
+      const indexResult = await ensureCollectionIndexes(database);
+      for (const failure of indexResult.failed) {
+        console.warn(
+          `Skipping index ${failure.collection}.${failure.name}: ${failure.reason}`,
+        );
+      }
+      if (indexResult.created.length > 0) {
+        console.info(
+          `Verified ${indexResult.created.length} MongoDB index(es): ${indexResult.created.join(", ")}.`,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `MongoDB index setup was skipped: ${error?.message || "unknown error"}`,
       );
     }
   } else {

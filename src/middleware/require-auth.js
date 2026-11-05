@@ -159,11 +159,15 @@ function isValidIdentity(payload) {
     if (typeof user.image !== "string" || user.image.length > 2048) {
       return false;
     }
-    try {
-      const image = new URL(user.image);
-      if (!["http:", "https:"].includes(image.protocol)) return false;
-    } catch {
-      return false;
+    // An empty value simply means "no profile photo"; only real URLs are validated.
+    const imageUrl = user.image.trim();
+    if (imageUrl) {
+      try {
+        const image = new URL(imageUrl);
+        if (!["http:", "https:"].includes(image.protocol)) return false;
+      } catch {
+        return false;
+      }
     }
   }
   return true;
