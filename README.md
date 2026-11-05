@@ -64,15 +64,26 @@ representation, logout or revocation can take up to its configured 60-second
 cache lifetime to be reflected by this API.
 
 `CLIENT_URL` controls exact credentialed CORS origins; wildcard origins are
-not used. `CLIENT_AUTH_URL` is the canonical authentication issuer. Credentialed
-CORS alone does not send a cookie set for one host to a different API host.
-Better Auth cookies are host-only by default, and browser `SameSite` and
-third-party-cookie policies may further limit direct Client-to-Server cookie
-transport. Production domains and cookie transport have not been verified.
-Before relying on cross-origin authenticated calls in production, use a
-same-origin Next.js proxy/BFF or deliberately configure and verify a compatible
-shared cookie domain and policy. Do not weaken secure cookie settings as a
-workaround.
+not used. `CLIENT_AUTH_URL` is the canonical authentication issuer and must
+match the origin configured by the Client's `BETTER_AUTH_URL`. Public studio
+reads continue directly from the browser to Express, so `CLIENT_URL` and
+credentialed CORS remain relevant for those requests.
+
+Protected studio and booking requests use the Client's same-origin Next.js
+marketplace BFF (`/api/marketplace/*`). The Client configures its Express
+upstream with the server-side `SERVER_API_BASE_URL`. The BFF allowlists the
+supported marketplace methods and routes, validates mutation origins, and
+forwards only Better Auth's filtered `session_data` cookie (not the opaque
+`session_token` or arbitrary browser cookies). Express verifies that JWT against
+the Client JWKS endpoint at `CLIENT_AUTH_URL/api/auth/jwks` and derives the
+request identity from the verified claims.
+
+The local unauthenticated BFF and public API paths have been checked, but
+authenticated BFF-to-Express/JWKS behavior and production deployment have not
+been verified in the current environment. Do not weaken secure cookie settings
+as a workaround; complete end-to-end verification with the configured Client,
+Server, and an explicitly isolated test database before claiming production
+readiness.
 
 ## HTTP API
 
