@@ -37,6 +37,22 @@ Configure `CLIENT_URL`, `CLIENT_AUTH_URL`, `MONGODB_URI`, and
 deployment, `CLIENT_AUTH_URL` must be the same canonical origin as the Client's
 server-only `BETTER_AUTH_URL`.
 
+## Vercel deployment
+
+The root `app.js` is the Vercel-discoverable Express entrypoint. It default
+exports the initialized Express application after validating configuration,
+connecting and pinging MongoDB, attempting index initialization, and
+registering the existing middleware and routes. It does not open a separate
+listener; Vercel handles incoming requests directly. Existing paths such as
+`/api/health` and `/api/studios` do not require a rewrite.
+
+Set `CLIENT_URL`, `CLIENT_AUTH_URL`, `MONGODB_URI`, and `MONGODB_DB_NAME` in the
+Vercel project's Production and Preview environments as applicable. Configure
+them with the values for that deployment; do not copy credentials into source
+control. Production startup fails visibly if required settings or MongoDB
+connectivity are invalid. The same `npm start` command continues to run a
+standalone local HTTP server through `index.js`.
+
 ## Authentication and CORS
 
 Better Auth is owned by the independent Next.js Client. This Server does not

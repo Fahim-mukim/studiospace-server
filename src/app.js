@@ -5,12 +5,12 @@ import { notFound } from "./middleware/not-found.js";
 import { createHealthRouter } from "./routes/health.routes.js";
 
 export function createApp({
+  app = express(),
   clientOrigins = ["http://localhost:3000"],
   getDatabaseStatus = () => "not_configured",
   registerRoutes = () => {},
 } = {}) {
   const allowedOrigins = new Set(clientOrigins);
-  const app = express();
 
   app.disable("x-powered-by");
   app.use(

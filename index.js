@@ -1135,6 +1135,58 @@ export function registerStudioRoutes(
 }
 
 export async function startServer() {
+  const { app, config } = await getServerInitialization();
+  const server = await new Promise((resolve, reject) => {
+    const httpServer = app.listen(config.port);
+    const onError = (error) => reject(error);
+    httpServer.once("error", onError);
+    httpServer.once("listening", () => {
+      httpServer.off("error", onError);
+      resolve(httpServer);
+    });
+  });
+
+  console.info(`StudioSpace API listening on port ${server.address().port}.`);
+
+  let shutdownPromise;
+  const shutdown = (signal) => {
+    if (shutdownPromise) return shutdownPromise;
+
+    shutdownPromise = (async () => {
+      console.info(`${signal} received; shutting down StudioSpace API.`);
+      let shutdownFailed = false;
+
+      try {
+        await new Promise((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      } catch {
+        shutdownFailed = true;
+        console.error("HTTP server shutdown failed.");
+      }
+
+      try {
+        await closeDatabase();
+      } catch {
+        shutdownFailed = true;
+        console.error("MongoDB shutdown failed.");
+      }
+
+      if (shutdownFailed) process.exitCode = 1;
+    })();
+
+    return shutdownPromise;
+  };
+
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+
+  return { app, server, shutdown };
+}
+
+let serverInitializationPromise;
+
+async function initializeServer(expressApp) {
   const config = loadConfig();
 
   if (config.nodeEnv === "production" && config.clientOrigins.length === 0) {
@@ -1195,6 +1247,7 @@ export async function startServer() {
   });
 
   const app = createApp({
+    app: expressApp,
     clientOrigins: config.clientOrigins,
     getDatabaseStatus,
     registerRoutes: (expressApp) =>
@@ -1203,52 +1256,22 @@ export async function startServer() {
         authenticate,
       }),
   });
-  const server = await new Promise((resolve, reject) => {
-    const httpServer = app.listen(config.port);
-    const onError = (error) => reject(error);
-    httpServer.once("error", onError);
-    httpServer.once("listening", () => {
-      httpServer.off("error", onError);
-      resolve(httpServer);
+  return { app, config };
+}
+
+function getServerInitialization(expressApp) {
+  if (!serverInitializationPromise) {
+    serverInitializationPromise = initializeServer(expressApp).catch((error) => {
+      serverInitializationPromise = undefined;
+      throw error;
     });
-  });
+  }
+  return serverInitializationPromise;
+}
 
-  console.info(`StudioSpace API listening on port ${server.address().port}.`);
-
-  let shutdownPromise;
-  const shutdown = (signal) => {
-    if (shutdownPromise) return shutdownPromise;
-
-    shutdownPromise = (async () => {
-      console.info(`${signal} received; shutting down StudioSpace API.`);
-      let shutdownFailed = false;
-
-      try {
-        await new Promise((resolve, reject) => {
-          server.close((error) => (error ? reject(error) : resolve()));
-        });
-      } catch {
-        shutdownFailed = true;
-        console.error("HTTP server shutdown failed.");
-      }
-
-      try {
-        await closeDatabase();
-      } catch {
-        shutdownFailed = true;
-        console.error("MongoDB shutdown failed.");
-      }
-
-      if (shutdownFailed) process.exitCode = 1;
-    })();
-
-    return shutdownPromise;
-  };
-
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
-
-  return { app, server, shutdown };
+export async function createServerApp(expressApp) {
+  const { app } = await getServerInitialization(expressApp);
+  return app;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
