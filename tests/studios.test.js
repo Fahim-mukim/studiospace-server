@@ -681,6 +681,7 @@ test("sort options use fixed MongoDB sort expressions", async (t) => {
     ["newest", { createdAt: -1, _id: -1 }],
     ["price-low", { hourlyRate: 1, _id: 1 }],
     ["price-high", { hourlyRate: -1, _id: 1 }],
+    ["rating", { rating: -1, reviewCount: -1, _id: 1 }],
   ]) {
     await t.test(sort, async () => {
       const database = createMockDatabase();

@@ -2,13 +2,13 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const DEVELOPMENT_CLIENT_ORIGIN = "http://localhost:3000";
+const DEFAULT_DEVELOPMENT_CLIENT_ORIGIN = "http://localhost:3000";
 
-function parseClientOrigins(value, nodeEnv) {
+function parseClientOrigins(value, nodeEnv, developmentClientOrigin) {
   const configuredOrigins = value
     ? value.split(",").map((item) => item.trim()).filter(Boolean)
     : nodeEnv === "development"
-      ? [DEVELOPMENT_CLIENT_ORIGIN]
+      ? [developmentClientOrigin]
       : [];
   const origins = new Set(configuredOrigins.map((item) => {
     let url;
@@ -32,7 +32,8 @@ function parseClientOrigins(value, nodeEnv) {
   }));
 
   if (nodeEnv === "development") {
-    origins.add(DEVELOPMENT_CLIENT_ORIGIN);
+    origins.add(DEFAULT_DEVELOPMENT_CLIENT_ORIGIN);
+    origins.add(developmentClientOrigin);
   }
   if (nodeEnv === "production" && origins.size === 0) {
     throw new Error("CLIENT_URL is required in production.");
@@ -41,9 +42,9 @@ function parseClientOrigins(value, nodeEnv) {
   return [...origins];
 }
 
-function parseClientAuthUrl(value, nodeEnv) {
+function parseClientAuthUrl(value, nodeEnv, developmentClientOrigin) {
   const configuredOrigin =
-    value || (nodeEnv === "development" ? DEVELOPMENT_CLIENT_ORIGIN : "");
+    value || (nodeEnv === "development" ? developmentClientOrigin : "");
   if (!configuredOrigin) {
     throw new Error("CLIENT_AUTH_URL is required outside development.");
   }
@@ -72,6 +73,8 @@ function parseClientAuthUrl(value, nodeEnv) {
 
 export function loadConfig(env = process.env) {
   const nodeEnv = env.NODE_ENV || "development";
+  const developmentClientOrigin =
+    env.CLIENT_URL?.split(",")[0]?.trim() || DEFAULT_DEVELOPMENT_CLIENT_ORIGIN;
   const port = env.PORT === undefined || env.PORT === "" ? 5000 : Number(env.PORT);
 
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -87,8 +90,12 @@ export function loadConfig(env = process.env) {
 
   return {
     port,
-    clientOrigins: parseClientOrigins(env.CLIENT_URL, nodeEnv),
-    clientAuthUrl: parseClientAuthUrl(env.CLIENT_AUTH_URL?.trim(), nodeEnv),
+    clientOrigins: parseClientOrigins(env.CLIENT_URL, nodeEnv, developmentClientOrigin),
+    clientAuthUrl: parseClientAuthUrl(
+      env.CLIENT_AUTH_URL?.trim(),
+      nodeEnv,
+      developmentClientOrigin,
+    ),
     mongodbUri,
     mongodbDbName,
     nodeEnv,

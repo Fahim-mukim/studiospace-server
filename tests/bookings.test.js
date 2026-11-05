@@ -310,6 +310,34 @@ test("POST /api/bookings returns 400 for an invalid booking date", async () => {
   await assertInvalidBooking(validRequest({ bookingDate: "not-a-date" }));
 });
 
+test("POST /api/bookings rejects impossible calendar dates", async () => {
+  await assertInvalidBooking(validRequest({ bookingDate: "2030-02-31" }));
+});
+
+test("POST /api/bookings rejects non-ISO date and time formats", async () => {
+  await assertInvalidBooking(
+    validRequest({ bookingDate: "2030-2-03", startTime: "10:00" }),
+  );
+  await assertInvalidBooking(
+    validRequest({ bookingDate: "2030-02-03", startTime: "10:60" }),
+  );
+});
+
+test("POST /api/bookings accepts a valid leap-day date", async () => {
+  const database = createBookingMockDatabase({ studios: [createStudio()] });
+  await withServer(database, async (baseUrl) => {
+    const response = await postBooking(
+      baseUrl,
+      validRequest({
+        bookingDate: "2028-02-29",
+        startTime: "10:00",
+        endTime: "12:00",
+      }),
+    );
+    assert.equal(response.status, 201);
+  });
+});
+
 test("POST /api/bookings returns 400 for an invalid booking time", async () => {
   await assertInvalidBooking(validRequest({ startTime: "25:00" }));
 });
@@ -430,6 +458,44 @@ test("POST /api/bookings does not block an overlapping Pending booking", async (
   const database = createBookingMockDatabase({
     studios: [createStudio()],
     bookings: [pending],
+  });
+
+  await withServer(database, async (baseUrl) => {
+    const response = await postBooking(baseUrl, validRequest({ bookingDate }));
+    assert.equal(response.status, 201);
+    assert.equal(database.calls.insertedDocuments.length, 1);
+  });
+});
+
+test("POST /api/bookings allows concurrent overlapping Pending requests", async () => {
+  const database = createBookingMockDatabase({ studios: [createStudio()] });
+  await withServer(database, async (baseUrl) => {
+    const responses = await Promise.all([
+      postBooking(baseUrl, validRequest()),
+      postBooking(baseUrl, validRequest()),
+    ]);
+
+    assert.deepEqual(responses.map((response) => response.status), [201, 201]);
+    assert.equal(database.calls.insertedDocuments.length, 2);
+    assert.ok(
+      database.calls.insertedDocuments.every(
+        ({ document }) => document.status === "Pending",
+      ),
+    );
+  });
+});
+
+test("POST /api/bookings allows a slot after its prior booking was cancelled", async () => {
+  const bookingDate = futureDate();
+  const cancelled = createBooking({
+    bookingDate,
+    startAt: new Date(`${bookingDate}T10:00`),
+    endAt: new Date(`${bookingDate}T12:00`),
+    status: "Cancelled",
+  });
+  const database = createBookingMockDatabase({
+    studios: [createStudio()],
+    bookings: [cancelled],
   });
 
   await withServer(database, async (baseUrl) => {

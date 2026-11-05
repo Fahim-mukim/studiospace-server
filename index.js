@@ -45,7 +45,7 @@ const studioInputFields = new Set([
   "rating",
   "reviewCount",
 ]);
-const allowedSorts = new Set(["newest", "price-low", "price-high"]);
+const allowedSorts = new Set(["newest", "price-low", "price-high", "rating"]);
 const publicStudioFields = [
   "title",
   "name",
@@ -147,7 +147,7 @@ function parseStudioQuery(query) {
   );
   const sort = queryString(query.sort, "sort") ?? "newest";
   if (!allowedSorts.has(sort)) {
-    throw invalidQuery("sort must be newest, price-low, or price-high.");
+    throw invalidQuery("sort must be newest, price-low, price-high, or rating.");
   }
 
   const filter = {};
@@ -174,7 +174,9 @@ function parseStudioQuery(query) {
       ? { createdAt: -1, _id: -1 }
       : sort === "price-low"
         ? { hourlyRate: 1, _id: 1 }
-        : { hourlyRate: -1, _id: 1 };
+        : sort === "price-high"
+          ? { hourlyRate: -1, _id: 1 }
+          : { rating: -1, reviewCount: -1, _id: 1 };
 
   return { filter, page, limit, sortOrder };
 }
@@ -252,6 +254,36 @@ function studioValidationError(message) {
   error.code = "VALIDATION_ERROR";
   error.safeMessage = message;
   return error;
+}
+
+function parseBookingDateTime(bookingDate, time) {
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(bookingDate);
+  const timeMatch = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+  if (!dateMatch || !timeMatch) return null;
+
+  const [, yearText, monthText, dayText] = dateMatch;
+  const [, hourText, minuteText] = timeMatch;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+
+  const dateTime = new Date(0);
+  dateTime.setFullYear(year, month - 1, day);
+  dateTime.setHours(hour, minute, 0, 0);
+
+  if (
+    dateTime.getFullYear() !== year ||
+    dateTime.getMonth() !== month - 1 ||
+    dateTime.getDate() !== day ||
+    dateTime.getHours() !== hour ||
+    dateTime.getMinutes() !== minute
+  ) {
+    return null;
+  }
+
+  return dateTime;
 }
 
 function requiredTrimmedString(value, name, minimumLength, maximumLength) {
@@ -954,9 +986,9 @@ export function registerStudioRoutes(
       throw studioValidationError("startTime and endTime are required.");
     }
 
-    const startDateTime = new Date(`${bookingDate}T${startTime}`);
-    const endDateTime = new Date(`${bookingDate}T${endTime}`);
-    if (Number.isNaN(startDateTime.getTime()) || Number.isNaN(endDateTime.getTime())) {
+    const startDateTime = parseBookingDateTime(bookingDate, startTime);
+    const endDateTime = parseBookingDateTime(bookingDate, endTime);
+    if (!startDateTime || !endDateTime) {
       throw studioValidationError("Invalid date or time.");
     }
     if (startDateTime < new Date(Date.now() - 60 * 1000)) {

@@ -13,6 +13,18 @@ test("development config defaults Client CORS and authentication to localhost", 
   assert.equal(config.mongodbDbName, "studiospace");
 });
 
+test("development config uses an explicit Client origin as the auth issuer", () => {
+  const config = loadConfig({
+    NODE_ENV: "development",
+    CLIENT_URL: "https://studio.example",
+  });
+  assert.deepEqual(config.clientOrigins, [
+    "https://studio.example",
+    "http://localhost:3000",
+  ]);
+  assert.equal(config.clientAuthUrl, "https://studio.example");
+});
+
 test("production config requires explicit Client and database settings", () => {
   const config = loadConfig({
     NODE_ENV: "production",

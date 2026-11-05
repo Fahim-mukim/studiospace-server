@@ -145,7 +145,7 @@ Public, paginated list. Supported query parameters:
 | `category` | Optional exact slug: `photo-studios`, `sound-stages`, `podcast-rooms`, `music-suites`, or `art-workshops`. |
 | `search` | Optional string, at most 100 characters; trimmed and escaped, case-insensitive search over title/name, location, category, overview, and amenities. |
 | `minPrice`, `maxPrice` | Optional non-negative numbers; inclusive `hourlyRate` bounds. `minPrice` cannot exceed `maxPrice`. |
-| `sort` | `newest` (default), `price-low`, or `price-high`. |
+| `sort` | `newest` (default), `price-low`, `price-high`, or `rating` (highest rated first, then most reviews). |
 | `page` | Positive integer; default `1`. |
 | `limit` | Positive integer; default `20`, maximum `100`. |
 
@@ -250,8 +250,8 @@ Request fields:
 | Field | Validation and behavior |
 |---|---|
 | `studioId` | Required ObjectId string or studio slug; nonexistent studio returns HTTP 404 (`STUDIO_NOT_FOUND`). |
-| `bookingDate` | Required string combined with start/end time and parsed as a date/time. Past starts are rejected. |
-| `startTime`, `endTime` | Required strings; end must follow start and duration must be at most 24 hours. |
+| `bookingDate` | Required `YYYY-MM-DD` calendar date combined with start/end time. Impossible dates and past starts are rejected. |
+| `startTime`, `endTime` | Required `HH:mm` 24-hour local times; end must follow start and duration must be at most 24 hours. |
 
 The Server snapshots the stored studio hourly rate and calculates
 `round(hourlyRate × durationHours, 2)`. Security deposit is not included.
@@ -260,9 +260,12 @@ does not mean host confirmation.
 
 Before insertion the handler looks for an overlapping `Confirmed` booking for
 the studio. A match returns HTTP 409 (`BOOKING_CONFLICT`). This is a
-find-then-insert check, not an atomic reservation: concurrent requests can race,
-and pending requests do not block one another. Current routes create `Pending` and transition a pending booking to
-`Cancelled`; they do not provide a host status-transition route.
+find-then-insert check, not an atomic reservation. Pending requests do not block
+one another by design, and current routes create `Pending` and transition a
+pending booking to `Cancelled`; they do not provide a host status-transition
+route. The API does not guarantee exclusive slot reservations for any future
+workflow that confirms bookings. Date/time values are interpreted in the
+Server process's local timezone; no studio timezone is currently stored.
 
 Invalid fields return HTTP 400 (`VALIDATION_ERROR`); missing/invalid identity
 returns HTTP 401; JWKS or database unavailability returns HTTP 503; unexpected

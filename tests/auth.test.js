@@ -155,7 +155,7 @@ after(async () => {
 });
 
 test("the resolver is cached by the configured JWKS URL", () => {
-  const endpoint = "http://localhost:3000/api/auth/jwks";
+  const endpoint = `${issuer}/api/auth/jwks`;
   assert.equal(getRemoteJwksResolver(endpoint), getRemoteJwksResolver(endpoint));
 });
 
