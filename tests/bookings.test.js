@@ -579,7 +579,7 @@ test("GET /api/bookings/mine returns an empty array when the verified user has n
   });
 });
 
-test("PATCH /api/bookings/:id/cancel cancels an owned Pending booking", async () => {
+test("PATCH /api/bookings/:id/cancel accepts an empty request and cancels an owned Pending booking", async () => {
   const booking = createBooking({
     _id: new ObjectId(),
     updatedAt: new Date("2020-01-01T00:00:00"),
@@ -588,10 +588,12 @@ test("PATCH /api/bookings/:id/cancel cancels an owned Pending booking", async ()
   const database = createBookingMockDatabase({ bookings: [booking] });
 
   await withServer(database, async (baseUrl) => {
-    const response = await fetch(
+    const request = new Request(
       `${baseUrl}/api/bookings/${booking._id}/cancel`,
       { method: "PATCH" },
     );
+    assert.equal(request.headers.get("content-type"), null);
+    const response = await fetch(request);
     const body = await response.json();
 
     assert.equal(response.status, 200);
