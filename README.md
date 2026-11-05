@@ -200,7 +200,22 @@ stored ownership. Success updates `updatedAt` and returns HTTP 200 with the
 public record. Authentication failures return HTTP 401; unavailable JWKS or
 MongoDB returns HTTP 503.
 
-There is **no Delete Studio endpoint**.
+#### `DELETE /api/studios/:id`
+
+Deletes one studio by its 24-character MongoDB ObjectId or exact slug. The
+route requires a valid Client session-data JWT and compares the studio's stored
+`ownerId` with the verified `request.user.id`; client-supplied owner fields are
+never used. A missing studio returns HTTP 404 (`STUDIO_NOT_FOUND`), and a
+non-owner receives HTTP 403 (`FORBIDDEN`).
+
+Before deletion, the Server checks the `bookings` collection for records whose
+`studioId` matches the studio's ObjectId string. If any booking history exists,
+the request returns HTTP 409 (`STUDIO_HAS_BOOKINGS`). Bookings are never
+cascade-deleted. When no bookings reference the studio, the Server deletes
+exactly that studio document and returns HTTP 200 with its ID. If MongoDB is
+unavailable, the route returns HTTP 503 (`DATABASE_NOT_READY`); authentication
+verification unavailability also returns HTTP 503. Unexpected failures use the
+standard safe HTTP 500 response.
 
 ### Bookings
 

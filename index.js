@@ -756,6 +756,91 @@ export function registerStudioRoutes(
     },
   );
 
+  app.delete("/api/studios/:id", authenticate, async (request, response) => {
+    const db = resolveDatabase();
+    if (!db) {
+      return response.status(503).json({
+        success: false,
+        message: "Database is not available",
+        code: "DATABASE_NOT_READY",
+        details: null,
+      });
+    }
+
+    const user = request.user;
+    const ownerId = typeof user?.id === "string" ? user.id.trim() : "";
+    if (!ownerId) {
+      return response.status(401).json({
+        success: false,
+        message: "Authentication is required",
+        code: "UNAUTHENTICATED",
+        details: null,
+      });
+    }
+
+    const { id } = request.params;
+    if (typeof id !== "string" || !id || id.length > 200) {
+      return response.status(404).json({
+        success: false,
+        message: "Studio not found",
+        code: "STUDIO_NOT_FOUND",
+        details: null,
+      });
+    }
+    const lookup = /^[\da-f]{24}$/i.test(id)
+      ? { _id: new ObjectId(id) }
+      : { slug: id };
+    const studios = db.collection("studios");
+    const existing = await studios.findOne(lookup);
+    if (!existing) {
+      return response.status(404).json({
+        success: false,
+        message: "Studio not found",
+        code: "STUDIO_NOT_FOUND",
+        details: null,
+      });
+    }
+    if (existing.ownerId !== ownerId) {
+      return response.status(403).json({
+        success: false,
+        message: "You do not have permission to delete this studio",
+        code: "FORBIDDEN",
+        details: null,
+      });
+    }
+
+    const booking = await db
+      .collection("bookings")
+      .findOne({ studioId: String(existing._id) });
+    if (booking) {
+      return response.status(409).json({
+        success: false,
+        message: "This studio cannot be deleted because it has booking history",
+        code: "STUDIO_HAS_BOOKINGS",
+        details: null,
+      });
+    }
+
+    const result = await studios.deleteOne({
+      _id: existing._id,
+      ownerId,
+    });
+    if (result.deletedCount !== 1) {
+      return response.status(404).json({
+        success: false,
+        message: "Studio not found",
+        code: "STUDIO_NOT_FOUND",
+        details: null,
+      });
+    }
+
+    return response.status(200).json({
+      success: true,
+      message: "Studio deleted successfully",
+      data: { id: String(existing._id) },
+    });
+  });
+
   app.post("/api/bookings", authenticate, async (request, response) => {
     const db = resolveDatabase();
     if (!db) {

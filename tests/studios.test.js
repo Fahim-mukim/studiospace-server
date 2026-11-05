@@ -61,11 +61,18 @@ function createTestAuthenticate({ user = authenticatedUser } = {}) {
 
 function createMockDatabase({
   records = [],
+  bookingRecords = [],
   total = records.length,
   detail,
   insertError,
+  deleteResult,
 } = {}) {
-  const calls = { insertedDocuments: [] };
+  const calls = {
+    insertedDocuments: [],
+    deleteOne: [],
+    findOneCalls: [],
+  };
+  let selectedCollectionName = "studios";
   const collection = {
     countDocuments: async (filter) => {
       calls.countFilter = filter;
@@ -101,6 +108,20 @@ function createMockDatabase({
     },
     async findOne(filter, options) {
       calls.findOne = { filter, options };
+      calls.findOneCalls.push({
+        collection: selectedCollectionName,
+        filter,
+      });
+      if (selectedCollectionName === "bookings") {
+        return bookingRecords.find((record) =>
+          Object.entries(filter || {}).every(([key, value]) => {
+            if (record[key] instanceof ObjectId && value instanceof ObjectId) {
+              return record[key].equals(value);
+            }
+            return record[key] === value;
+          }),
+        ) ?? null;
+      }
       if (detail !== undefined) {
         if (filter?._id && detail._id && !detail._id.equals(filter._id) && typeof filter._id === "object") {
           // fall through
@@ -145,13 +166,29 @@ function createMockDatabase({
       }
       return { acknowledged: true, modifiedCount: record ? 1 : 0 };
     },
+    async deleteOne(filter) {
+      calls.deleteOne.push(filter);
+      if (deleteResult !== undefined) {
+        return { acknowledged: true, deletedCount: deleteResult };
+      }
+      const index = records.findIndex(
+        (record) =>
+          record._id.equals(filter._id) && record.ownerId === filter.ownerId,
+      );
+      if (index < 0) return { acknowledged: true, deletedCount: 0 };
+      records.splice(index, 1);
+      return { acknowledged: true, deletedCount: 1 };
+    },
   };
 
   return {
     calls,
+    records,
+    bookingRecords,
     collectionName: undefined,
     collection(name) {
       this.collectionName = name;
+      selectedCollectionName = name;
       return collection;
     },
   };
@@ -930,5 +967,183 @@ test("PATCH /api/studios/:id prevents changing protected ownership fields", asyn
       body: JSON.stringify({ ownerId: "hacker" }),
     });
     assert.equal(response.status, 400);
+  });
+});
+
+test("DELETE /api/studios/:id lets the owner delete exactly one studio by ObjectId", async () => {
+  const record = { ...baseRecord(), ownerId: authenticatedUser.id };
+  const otherRecord = {
+    ...baseRecord(),
+    _id: new ObjectId("65c7a6b0c9d2fddc4493e005"),
+    ownerId: "another-user",
+  };
+  const database = createMockDatabase({ records: [record, otherRecord] });
+
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+      method: "DELETE",
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      success: true,
+      message: "Studio deleted successfully",
+      data: { id: String(record._id) },
+    });
+    assert.deepEqual(database.calls.deleteOne, [
+      { _id: record._id, ownerId: authenticatedUser.id },
+    ]);
+    assert.deepEqual(database.calls.findOneCalls[0], {
+      collection: "studios",
+      filter: { _id: record._id },
+    });
+    assert.deepEqual(database.records, [otherRecord]);
+  });
+});
+
+test("DELETE /api/studios/:id supports an owned studio slug", async () => {
+  const record = {
+    ...baseRecord(),
+    ownerId: authenticatedUser.id,
+    slug: "daylight-studio",
+  };
+  const database = createMockDatabase({ records: [record] });
+
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(
+      `${baseUrl}/api/studios/${record.slug}`,
+      { method: "DELETE" },
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(database.calls.findOneCalls[0], {
+      collection: "studios",
+      filter: { slug: record.slug },
+    });
+    assert.equal(database.calls.deleteOne.length, 1);
+  });
+});
+
+test("DELETE /api/studios/:id rejects a non-owner without deleting the studio", async () => {
+  const record = { ...baseRecord(), ownerId: "another-user" };
+  const database = createMockDatabase({ records: [record] });
+
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+      method: "DELETE",
+    });
+
+    assert.equal(response.status, 403);
+    assert.equal((await response.json()).code, "FORBIDDEN");
+    assert.equal(database.calls.deleteOne.length, 0);
+    assert.equal(database.calls.findOne.filter._id.equals(record._id), true);
+    assert.deepEqual(database.records, [record]);
+  });
+});
+
+test("DELETE /api/studios/:id rejects unauthenticated requests", async () => {
+  const record = { ...baseRecord(), ownerId: authenticatedUser.id };
+  const database = createMockDatabase({ records: [record] });
+
+  await withServer(
+    database,
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+        method: "DELETE",
+      });
+
+      assert.equal(response.status, 401);
+      assert.equal(database.calls.deleteOne.length, 0);
+    },
+    {
+      authenticate: (_request, response) => {
+        response.status(401).json({
+          success: false,
+          message: "Authentication is required",
+          code: "UNAUTHENTICATED",
+          details: null,
+        });
+      },
+    },
+  );
+});
+
+test("DELETE /api/studios/:id returns 404 for unknown and malformed identifiers", async () => {
+  const database = createMockDatabase({ records: [] });
+
+  await withServer(database, async (baseUrl) => {
+    const missingResponse = await fetch(
+      `${baseUrl}/api/studios/65c7a6b0c9d2fddc4493e999`,
+      { method: "DELETE" },
+    );
+    const malformedResponse = await fetch(
+      `${baseUrl}/api/studios/not%20a%20valid%20slug`,
+      { method: "DELETE" },
+    );
+
+    assert.equal(missingResponse.status, 404);
+    assert.equal(malformedResponse.status, 404);
+    assert.equal(database.calls.deleteOne.length, 0);
+  });
+});
+
+test("DELETE /api/studios/:id returns 503 when the database is unavailable", async () => {
+  await withServer(null, async (baseUrl) => {
+    const response = await fetch(
+      `${baseUrl}/api/studios/65c7a6b0c9d2fddc4493e001`,
+      { method: "DELETE" },
+    );
+
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).code, "DATABASE_NOT_READY");
+  });
+});
+
+test("DELETE /api/studios/:id preserves studios with booking history", async () => {
+  const record = { ...baseRecord(), ownerId: authenticatedUser.id };
+  const booking = {
+    _id: new ObjectId(),
+    studioId: String(record._id),
+    status: "Cancelled",
+  };
+  const database = createMockDatabase({
+    records: [record],
+    bookingRecords: [booking],
+  });
+
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+      method: "DELETE",
+    });
+
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).code, "STUDIO_HAS_BOOKINGS");
+    assert.equal(database.calls.deleteOne.length, 0);
+    assert.equal(database.collectionName, "bookings");
+    assert.deepEqual(database.records, [record]);
+    assert.deepEqual(database.bookingRecords, [booking]);
+    assert.equal(booking.studioId, String(record._id));
+    assert.equal(booking.status, "Cancelled");
+    assert.equal(record.ownerId, authenticatedUser.id);
+  });
+});
+
+test("DELETE /api/studios/:id never reports success when MongoDB deletes no document", async () => {
+  const record = { ...baseRecord(), ownerId: authenticatedUser.id };
+  const database = createMockDatabase({
+    records: [record],
+    deleteResult: 0,
+  });
+
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/${record._id}`, {
+      method: "DELETE",
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 404);
+    assert.equal(body.success, false);
+    assert.equal(body.code, "STUDIO_NOT_FOUND");
+    assert.equal(database.calls.deleteOne.length, 1);
   });
 });
