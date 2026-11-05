@@ -179,10 +179,63 @@ function parseStudioQuery(query) {
   return { filter, page, limit, sortOrder };
 }
 
-function serializeStudio(studio) {
+function serializeStudio(studio, { includeReviews = false } = {}) {
   const serialized = { id: String(studio._id) };
   for (const field of publicStudioFields) {
+    if (includeReviews && (field === "rating" || field === "reviewCount")) {
+      continue;
+    }
     if (studio[field] !== undefined) serialized[field] = studio[field];
+  }
+  const reviews = includeReviews && Array.isArray(studio.reviews)
+    ? studio.reviews.flatMap((review) => {
+        if (!review || typeof review !== "object" || Array.isArray(review)) {
+          return [];
+        }
+        const rating = review.rating;
+        const text = typeof review.text === "string" ? review.text.trim() : "";
+        if (
+          typeof rating !== "number" ||
+          !Number.isFinite(rating) ||
+          rating < 1 ||
+          rating > 5 ||
+          !text ||
+          text.length > 4000
+        ) {
+          return [];
+        }
+
+        const publicReview = { rating, text };
+        const id = review._id instanceof ObjectId ? String(review._id) : "";
+        if (id && id.length <= 128) publicReview.id = id;
+        if (
+          typeof review.name === "string" &&
+          review.name.trim() &&
+          !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(review.name.trim()) &&
+          review.name.trim().length <= 100
+        ) {
+          publicReview.name = review.name.trim();
+        }
+        if (review.date instanceof Date && Number.isFinite(review.date.getTime())) {
+          publicReview.date = review.date.toISOString();
+        } else if (
+          typeof review.date === "string" &&
+          review.date.trim().length > 0 &&
+          review.date.trim().length <= 100
+        ) {
+          publicReview.date = review.date.trim();
+        }
+        return [publicReview];
+      })
+    : [];
+  if (includeReviews) {
+    serialized.reviewCount = reviews.length;
+    if (reviews.length > 0) {
+      const average =
+        reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length;
+      serialized.rating = Number(average.toFixed(1));
+    }
+    serialized.reviews = reviews;
   }
   if (studio.host && typeof studio.host === "object") {
     serialized.host = Object.fromEntries(
@@ -492,6 +545,7 @@ export function registerStudioRoutes(
           projection: Object.fromEntries([
             ["_id", 1],
             ...publicStudioFields.map((field) => [field, 1]),
+            ["reviews", 1],
             ["host.name", 1],
             ["host.displayName", 1],
             ["host.avatar", 1],
@@ -557,7 +611,7 @@ export function registerStudioRoutes(
     return response.status(200).json({
       success: true,
       message: "Studio retrieved successfully",
-      data: serializeStudio(studio),
+      data: serializeStudio(studio, { includeReviews: true }),
     });
   });
 

@@ -750,6 +750,72 @@ test("GET /api/studios/:id looks up valid MongoDB ObjectIds", async () => {
   });
 });
 
+test("GET /api/studios/:id exposes only valid public reviews and derives rating metadata", async () => {
+  const record = {
+    ...baseRecord(),
+    rating: 1,
+    reviewCount: 900,
+    reviews: [
+      {
+        _id: new ObjectId("65c7a6b0c9d2fddc4493e101"),
+        name: "  Creative Guest  ",
+        rating: 5,
+        date: new Date("2025-01-02T03:04:05.000Z"),
+        text: "  Excellent natural light and a very helpful host.  ",
+        userId: "private-user-id",
+        email: "private@example.test",
+        ownerId: "private-owner-id",
+      },
+      {
+        name: "Invalid rating",
+        rating: 8,
+        text: "This review must not be exposed.",
+      },
+      {
+        name: "private-reviewer@example.test",
+        rating: 5,
+        text: "This review must not expose an email as its public name.",
+        email: "private-reviewer@example.test",
+      },
+      {
+        name: "Missing text",
+        rating: 5,
+      },
+    ],
+  };
+  const database = createMockDatabase({ detail: record });
+
+  await withServer(database, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/studios/${record._id}`);
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.data.reviews, [
+      {
+        id: "65c7a6b0c9d2fddc4493e101",
+        name: "Creative Guest",
+        rating: 5,
+        date: "2025-01-02T03:04:05.000Z",
+        text: "Excellent natural light and a very helpful host.",
+      },
+      {
+        rating: 5,
+        text: "This review must not expose an email as its public name.",
+      },
+    ]);
+    assert.equal(body.data.rating, 5);
+    assert.equal(body.data.reviewCount, 2);
+    assert.equal("email" in body.data.reviews[0], false);
+    assert.equal("userId" in body.data.reviews[0], false);
+    assert.equal("ownerId" in body.data.reviews[0], false);
+    assert.equal("name" in body.data.reviews[1], false);
+    assert.equal(body.data.reviews[1].name, undefined);
+    assert.equal("email" in body.data.reviews[1], false);
+    assert.equal("ownerEmail" in body.data, false);
+    assert.equal("passwordHash" in body.data, false);
+  });
+});
+
 test("GET /api/studios/:id looks up non-ObjectId slugs", async () => {
   const database = createMockDatabase({ detail: baseRecord() });
   await withServer(database, async (baseUrl) => {

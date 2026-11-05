@@ -25,13 +25,17 @@ credentials in source control. `.env.example` contains sample values only.
 | `CLIENT_URL` | Exact browser origin(s) allowed by credentialed CORS; comma-separated for multiple origins | `http://localhost:3000` |
 | `MONGODB_URI` | Server's MongoDB connection URI | `mongodb://127.0.0.1:27017` in `.env.example` |
 | `MONGODB_DB_NAME` | MongoDB database name | `studiospace` |
-| `CLIENT_AUTH_URL` | Canonical Next.js origin used as JWT issuer and JWKS base | `http://localhost:3000` in development |
+| `CLIENT_AUTH_URL` | Canonical Next.js origin used as JWT issuer and JWKS base; must match Client `BETTER_AUTH_URL` origin | `http://localhost:3000` in development |
 | `NODE_ENV` | Runtime environment | `development` |
 
 Development adds `http://localhost:3000` to the allowed origins. Production
 requires explicit `CLIENT_URL`, an HTTPS `CLIENT_AUTH_URL`, and `MONGODB_URI`.
 When `MONGODB_URI` is supplied to the Server, `MONGODB_DB_NAME` is also
 required.
+Configure `CLIENT_URL`, `CLIENT_AUTH_URL`, `MONGODB_URI`, and
+`MONGODB_DB_NAME` independently for every deployment target. For each Client
+deployment, `CLIENT_AUTH_URL` must be the same canonical origin as the Client's
+server-only `BETTER_AUTH_URL`.
 
 ## Authentication and CORS
 
@@ -241,10 +245,8 @@ does not mean host confirmation.
 Before insertion the handler looks for an overlapping `Confirmed` booking for
 the studio. A match returns HTTP 409 (`BOOKING_CONFLICT`). This is a
 find-then-insert check, not an atomic reservation: concurrent requests can race,
-and pending requests do not block one another. There is no host approval or
-confirmation endpoint. Current routes create `Pending` and transition a
-pending booking to `Cancelled`; they do not create `Confirmed` or `Completed`
-records.
+and pending requests do not block one another. Current routes create `Pending` and transition a pending booking to
+`Cancelled`; they do not provide a host status-transition route.
 
 Invalid fields return HTTP 400 (`VALIDATION_ERROR`); missing/invalid identity
 returns HTTP 401; JWKS or database unavailability returns HTTP 503; unexpected
@@ -265,11 +267,17 @@ returns HTTP 404 (`BOOKING_NOT_FOUND`), another user's booking HTTP 403
 (`FORBIDDEN`), and a non-pending booking HTTP 400 (`INVALID_BOOKING_STATUS`).
 Authentication or database failures return HTTP 401 or 503, respectively.
 
-### Reviews and unsupported operations
+### Reviews and booking behavior
 
-There are no review routes, booking approval/confirmation routes, or studio
-deletion route in the current Server source. Do not infer these capabilities
-from fields rendered by the Client.
+The studio detail response includes only validated public fields from review
+records embedded in the studio document, when such records exist. It omits
+reviewer IDs, email addresses, and other private fields, and derives rating and
+review count from valid review records. When no valid reviews are stored, the
+response has a zero count and no rating; the Client displays its empty state.
+There is no review submission endpoint.
+
+Booking creation returns a `Pending` request. Owners can list their bookings
+and cancel their own pending requests.
 
 ## MongoDB, indexes, and seed data
 
@@ -323,11 +331,13 @@ on the listed server and test files.
 The separate Next.js Client configures its Express API origin with
 `NEXT_PUBLIC_API_BASE_URL` (local default `http://localhost:5000`). The current
 Client uses the Server's public studio reads and protected create/list/update
-routes, plus booking create/list/cancel routes. Client and Server must be
+routes, including owner-protected deletion, plus booking create/list/cancel
+routes. Client and Server must be
 configured independently, and production cookie transport between their
 domains remains to be verified.
 
 This README and the Client's
 [requirement traceability](https://github.com/Fahim-mukim/studiospace-client/blob/main/docs/requirement-traceability.md)
-describe implemented endpoints and known gaps; they are not certification
-against the original assignment, which has not been located.
+describe implemented endpoints and the verification limits. Client-side Google
+OAuth configuration and the production Google Console callback are managed in
+the independent Next.js Client deployment.
