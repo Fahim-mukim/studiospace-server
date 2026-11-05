@@ -1,325 +1,306 @@
 # StudioSpace Server
 
-The StudioSpace Server is the independent Express.js REST API application.
-It provides health/readiness endpoints, MongoDB-backed public studio reads,
-and protected studio creation. The independently maintained Next.js Client
-owns BetterAuth and communicates with this Server through HTTP APIs.
+StudioSpace Server is an independent Express.js REST API. It owns marketplace
+records in MongoDB and communicates with the separate Next.js Client over
+HTTP. Each application has its own repository, package manifest, environment,
+Git history, and deployment; neither repository imports files from the other.
 
-## Requirements
+## Requirements and setup
 
 - Node.js 20.19.0 or later
 - npm compatible with the installed Node.js release
 
-The MongoDB Node.js driver 7.8 requires Node.js 20.19.0 or later.
-
-## Setup
-
-From this repository:
-
 ```sh
 npm install
-```
-
-Copy `.env.example` to `.env` and set values for the local environment:
-
-```sh
 cp .env.example .env
+npm run dev
 ```
 
-PowerShell equivalent:
+In PowerShell, use `Copy-Item .env.example .env`. Do not commit `.env` or put
+credentials in source control. `.env.example` contains sample values only.
 
-```powershell
-Copy-Item .env.example .env
-```
-
-Do not commit `.env` or put credentials in source control. `.env.example`
-contains only safe sample values.
-
-| Variable | Purpose | Default / example |
+| Variable | Purpose | Example/default |
 |---|---|---|
 | `PORT` | HTTP port | `5000` |
-| `CLIENT_URL` | Exact allowed client origin(s); multiple origins may be comma-separated | `http://localhost:3000` |
-| `MONGODB_URI` | MongoDB connection URI | `mongodb://127.0.0.1:27017` in `.env.example` |
-| `MONGODB_DB_NAME` | Database selected by the driver | `studiospace` |
-| `CLIENT_AUTH_URL` | Canonical Next.js origin used as the JWT issuer and JWKS endpoint base | `http://localhost:3000` in development |
+| `CLIENT_URL` | Exact browser origin(s) allowed by credentialed CORS; comma-separated for multiple origins | `http://localhost:3000` |
+| `MONGODB_URI` | Server's MongoDB connection URI | `mongodb://127.0.0.1:27017` in `.env.example` |
+| `MONGODB_DB_NAME` | MongoDB database name | `studiospace` |
+| `CLIENT_AUTH_URL` | Canonical Next.js origin used as JWT issuer and JWKS base | `http://localhost:3000` in development |
 | `NODE_ENV` | Runtime environment | `development` |
 
-Development always allows the `http://localhost:3000` origin in addition to
-the origins configured through `CLIENT_URL`. Other origins are not allowed.
-Credentialed CORS is enabled only for an exact configured origin; wildcard
-origins are not used.
+Development adds `http://localhost:3000` to the allowed origins. Production
+requires explicit `CLIENT_URL`, an HTTPS `CLIENT_AUTH_URL`, and `MONGODB_URI`.
+When `MONGODB_URI` is supplied to the Server, `MONGODB_DB_NAME` is also
+required.
 
-## Authentication
+## Authentication and CORS
 
-BetterAuth is owned by the independent Next.js Client, not this Express
-Server. This Server does not expose BetterAuth signup/login/logout handlers,
-configure Google OAuth, or own authentication credentials or persistence.
-The Client remains responsible for signup, login, OAuth, session management,
-and its BetterAuth MongoDB `user`, `account`, `session`, and JWKS records.
-The browser must never connect to MongoDB directly.
+Better Auth is owned by the independent Next.js Client. This Server does not
+implement signup, login, logout, or Google OAuth handlers and does not own
+authentication credentials. The Client's Better Auth runtime persists
+`user`, `account`, `session`, and `jwks` records. The Server uses its own
+MongoDB connection for marketplace collections such as `studios` and
+`bookings`; both runtimes may use the same database. The browser never connects
+directly to MongoDB.
 
-For protected API requests, this Server verifies the Client's short-lived
-JWT-backed session-data cookie using `jose` and the Client's remote JWKS
-endpoint:
+Protected API routes use `jose` to verify the Client's short-lived signed
+session-data cookie against remote JWKS:
 
 ```text
 Issuer:   CLIENT_AUTH_URL
 JWKS:     CLIENT_AUTH_URL/api/auth/jwks
 Audience: better-auth:session-cache
-Cookie:   better-auth.session_data (or its secure/chunked variant)
+Cookie:   better-auth.session_data (including secure/chunked variants)
 ```
 
 The verifier checks the EdDSA signature, issuer, audience, token type,
-expiration, and consistency of the signed user/session identity before
-attaching `request.user`. It never accepts a client-submitted user ID as
-identity. The opaque `better-auth.session_token` cookie is not a JWT and is
-never used for verification. A valid session-data cookie is an optimistic
-cached representation, so logout or session invalidation may take up to the
-Client's configured 60-second cache lifetime to be reflected by this API.
-Missing or invalid credentials return HTTP 401; unavailable JWKS verification
-returns HTTP 503. JWKS resolvers are reused per endpoint.
+expiration, and signed user/session identity before setting `request.user`.
+Ownership is derived from that verified identity; client-submitted user IDs
+are not trusted. The opaque `better-auth.session_token` cookie is not a JWT
+and is never used for verification. The JWKS resolver is cached per URL.
+Missing or invalid credentials return HTTP 401; an unavailable JWKS service
+returns HTTP 503. Since the Client's session-data JWT is a cached session
+representation, logout or revocation can take up to its configured 60-second
+cache lifetime to be reflected by this API.
 
-`CLIENT_URL` controls the exact allowed browser origins for credentialed CORS.
-`CLIENT_AUTH_URL` is separately the canonical Client issuer origin. In local
-development these are typically `http://localhost:3000`; the Express API uses
-`http://localhost:5000`.
+`CLIENT_URL` controls exact credentialed CORS origins; wildcard origins are
+not used. `CLIENT_AUTH_URL` is the canonical authentication issuer. Credentialed
+CORS alone does not send a cookie set for one host to a different API host.
+Better Auth cookies are host-only by default, and browser `SameSite` and
+third-party-cookie policies may further limit direct Client-to-Server cookie
+transport. Production domains and cookie transport have not been verified.
+Before relying on cross-origin authenticated calls in production, use a
+same-origin Next.js proxy/BFF or deliberately configure and verify a compatible
+shared cookie domain and policy. Do not weaken secure cookie settings as a
+workaround.
 
-### Cookie and deployment limitation
+## HTTP API
 
-Credentialed CORS does not transfer a cookie between hosts. BetterAuth's
-HTTP-only cookies are host-only by default, so a cookie set for the Next.js
-host is not automatically sent to a different Express API host. `SameSite`
-and browser third-party-cookie policies can impose additional restrictions.
-Production Client/Server domains were not available to verify. Before relying
-on direct browser-to-Express authentication in production, use a same-origin
-Next.js proxy/BFF or deliberately configure and verify a compatible shared
-cookie domain and cross-origin cookie policy. Do not weaken secure cookie
-settings as a workaround. The Server-side JWT verifier is in place, but
-production cookie transport is not yet confirmed.
-
-### Authentication test coverage
-
-Server tests generate signed test JWTs and exercise the real verifier and
-protected `/api/studios` route, including invalid claims, JWKS failures,
-identity-derived ownership, and rejection of unauthenticated requests. They
-do not test BetterAuth or MongoDB authentication persistence. Real signup,
-credential/session persistence, cookie issuance, and logout integration tests
-belong to the Next.js Client repository, which owns that authentication
-instance and its dedicated opt-in MongoDB integration test.
-
-## Run
-
-Start the development server with automatic restarts:
-
-```sh
-npm run dev
-```
-
-Start the server as a production process:
-
-```sh
-npm start
-```
-
-Run automated tests and JavaScript syntax checks:
-
-```sh
-npm test
-npm run check
-```
-
-## Database and service checks
-
-When `MONGODB_URI` is configured, startup explicitly connects using one
-reusable MongoDB client, selects `MONGODB_DB_NAME`, and verifies connectivity
-with a ping. Connection failures stop startup with a safe message; credentials
-and raw driver errors are not logged or returned to clients.
-
-In development, a missing `MONGODB_URI` starts the HTTP service in a clearly
-logged degraded mode. Liveness remains available, while readiness reports
-HTTP 503. In production, a missing `MONGODB_URI` prevents startup. No
-in-memory database fallback is used.
-
-- `GET /api/health` is a liveness check. HTTP 200 means the Express process is
-  running; it does not depend on MongoDB.
-- `GET /api/ready` is a readiness check. HTTP 200 means MongoDB connected and
-  passed its startup ping; otherwise it returns HTTP 503.
-
-## Public studio read APIs
-
-Studio reads use the MongoDB `studios` collection through the shared database
-connection. They return stored database records only; the illustrative
-frontend fixtures are not copied into MongoDB or returned as fallback data.
-If MongoDB is unavailable, both routes return HTTP 503 with
-`DATABASE_NOT_READY`.
-
-### `GET /api/studios`
-
-Returns a paginated list. Supported query parameters:
-
-| Parameter | Meaning |
-|---|---|
-| `category` | One of `photo-studios`, `sound-stages`, `podcast-rooms`, `music-suites`, or `art-workshops` |
-| `search` | Case-insensitive search across title/name, location, category, overview, and amenities |
-| `minPrice`, `maxPrice` | Inclusive non-negative `hourlyRate` bounds |
-| `sort` | `newest` (default), `price-low`, or `price-high` |
-| `page` | Positive page number (default `1`) |
-| `limit` | Positive page size (default `20`, maximum `100`) |
-
-Example requests:
-
-```text
-GET http://localhost:5000/api/studios
-GET http://localhost:5000/api/studios?limit=6&sort=newest
-GET http://localhost:5000/api/studios?category=photo-studios&minPrice=50&maxPrice=120
-GET http://localhost:5000/api/studios?search=daylight&page=1&limit=10
-```
-
-Successful responses contain public studio fields with MongoDB `_id`
-serialized as the string `id`:
-
-```json
-{
-  "success": true,
-  "message": "Studios retrieved successfully",
-  "data": [],
-  "pagination": {
-    "page": 1,
-    "limit": 20,
-    "total": 0,
-    "totalPages": 0
-  }
-}
-```
-
-Invalid filters return HTTP 400 with `code: "INVALID_QUERY"`. The endpoint
-uses database-side filtering, counting, sorting, and pagination; search input
-is escaped and sort values are allowlisted.
-
-### `GET /api/studios/:id`
-
-Looks up one studio by a 24-character MongoDB ObjectId or by its `slug`.
-
-```text
-GET http://localhost:5000/api/studios/65c7a6b0c9d2fddc4493e001
-GET http://localhost:5000/api/studios/daylight-photo-studio
-```
-
-Success returns HTTP 200 and a single serialized public studio in `data`.
-An unknown studio returns HTTP 404:
+Unless stated otherwise, errors use this JSON shape:
 
 ```json
 {
   "success": false,
-  "message": "Studio not found",
-  "code": "STUDIO_NOT_FOUND",
+  "message": "A safe explanation",
+  "code": "ERROR_CODE",
   "details": null
 }
 ```
 
-Studio update/delete, booking, and client API integration are not included in
-this milestone.
+Malformed JSON returns HTTP 400 (`INVALID_JSON`); JSON bodies over 1 MiB return
+HTTP 413 (`PAYLOAD_TOO_LARGE`). Unexpected errors return HTTP 500
+(`INTERNAL_SERVER_ERROR`) without stack traces or database internals. Unknown
+paths return HTTP 404 (`ROUTE_NOT_FOUND`).
 
-### `POST /api/studios`
+### Health and readiness
 
-Creates one studio in the MongoDB `studios` collection. This endpoint requires
-a valid JWT-backed session-data cookie issued by the Next.js Client; send
-credentialed requests from a configured client origin. It uses the same
-shared MongoDB connection as the public GET endpoints.
+| Method and path | Auth | Behavior and responses |
+|---|---|---|
+| `GET /api/health` | None | HTTP 200 when the Express process is running; does not depend on MongoDB. |
+| `GET /api/ready` | None | HTTP 200 when MongoDB is connected and passed its startup ping; otherwise HTTP 503 with `DATABASE_NOT_READY`. |
 
-The client submits these fields:
+### Studios
+
+Studio records are stored in the MongoDB `studios` collection. Public responses
+serialize MongoDB `_id` as string `id` and omit private owner fields.
+Database-unavailable studio requests return HTTP 503 (`DATABASE_NOT_READY`).
+
+#### `GET /api/studios`
+
+Public, paginated list. Supported query parameters:
+
+| Parameter | Validation and behavior |
+|---|---|
+| `category` | Optional exact slug: `photo-studios`, `sound-stages`, `podcast-rooms`, `music-suites`, or `art-workshops`. |
+| `search` | Optional string, at most 100 characters; trimmed and escaped, case-insensitive search over title/name, location, category, overview, and amenities. |
+| `minPrice`, `maxPrice` | Optional non-negative numbers; inclusive `hourlyRate` bounds. `minPrice` cannot exceed `maxPrice`. |
+| `sort` | `newest` (default), `price-low`, or `price-high`. |
+| `page` | Positive integer; default `1`. |
+| `limit` | Positive integer; default `20`, maximum `100`. |
+
+Returns HTTP 200 with `data` and `pagination` (`page`, `limit`, `total`,
+`totalPages`). Invalid query values return HTTP 400 (`INVALID_QUERY`). Filtering,
+counting, sorting, and pagination run against MongoDB.
+
+```text
+GET /api/studios?limit=6&sort=newest
+GET /api/studios?category=photo-studios&minPrice=50&maxPrice=120
+GET /api/studios?search=daylight&page=1&limit=10
+```
+
+#### `GET /api/studios/:id`
+
+Public lookup by a 24-character MongoDB ObjectId or exact slug. Returns HTTP
+200 with a serialized record, HTTP 404 (`STUDIO_NOT_FOUND`) if absent, or
+HTTP 503 if MongoDB is unavailable.
+
+#### `POST /api/studios`
+
+Authenticated with a valid Client session-data JWT; inserts a new record in
+`studios` and returns HTTP 201. Send credentialed browser requests from a
+configured Client origin.
+
+Request fields:
 
 | Field | Validation |
 |---|---|
 | `title` | Required trimmed string, 3–100 characters |
-| `categorySlug` | Required; `photo-studios`, `sound-stages`, `podcast-rooms`, `music-suites`, or `art-workshops` |
+| `categorySlug` | Required supported category slug |
 | `hourlyRate` | Required finite positive number |
 | `securityDeposit` | Required finite non-negative number |
 | `capacity` | Required positive safe integer |
 | `location` | Required trimmed string, 2–160 characters |
-| `image` | Required valid HTTP(S) URL (maximum 2,048 characters) |
-| `imageAlt` | Optional trimmed string, maximum 250 characters |
-| `amenities` | Required array of 1–20 non-empty strings, each at most 80 characters; duplicate values are removed |
-| `overview` | Required trimmed description, 30–2,000 characters |
+| `image` | Required HTTP(S) URL, at most 2,048 characters |
+| `imageAlt` | Optional trimmed string, at most 250 characters |
+| `amenities` | Required array of 1–20 non-empty strings, each at most 80 characters; case-insensitive duplicates are removed |
+| `overview` | Required trimmed string, 30–2,000 characters |
 
-`image` is the resulting URL after the separate client-side image upload flow;
-this API does not upload files or manage image-host credentials. The server
-derives the display `category` from `categorySlug`, generates the ObjectId and
-unique slug, timestamps, and initial `reviewCount`, and derives `ownerId`,
-lowercase `ownerEmail`, `ownerName`, and the public `host` display fields from
-the authenticated BetterAuth user. Submitted ownership or server-managed
-fields are ignored and cannot override those values. Owner email and other
-private ownership fields are never included in public studio responses.
+Unknown fields are rejected with HTTP 400 (`VALIDATION_ERROR`). Recognized
+server-managed fields may be present but are ignored. The API derives category
+label, ObjectId, unique slug, timestamps, initial `reviewCount`, owner identity,
+and public host fields. Owner data comes from verified `request.user`, never
+from the request body. This endpoint accepts an already available image URL;
+it does not upload files.
 
-Example request (the opaque `session_token` is not accepted as a JWT):
+Other responses: HTTP 401 (`UNAUTHENTICATED` or `AUTH_USER_INCOMPLETE`), HTTP
+503 (`AUTHENTICATION_UNAVAILABLE` or `DATABASE_NOT_READY`), and HTTP 500 for
+unexpected failures.
 
-```http
-POST /api/studios
-Content-Type: application/json
-Cookie: better-auth.session_data=<JWT>
+#### `GET /api/studios/mine`
+
+Authenticated. Returns HTTP 200 with studios filtered by verified `request.user.id`,
+newest first; no records returns an empty `data` array. Does not accept an
+owner ID from query/body. Returns HTTP 401 for missing/incomplete identity,
+HTTP 503 if authentication verification or MongoDB is unavailable, or HTTP 500
+for unexpected failures.
+
+#### `PATCH /api/studios/:id`
+
+Authenticated partial update by ObjectId or slug. The Server looks up the
+record, then compares its stored `ownerId` with the verified user ID. Only the
+owner can update; a non-owner receives HTTP 403 (`FORBIDDEN`), a missing studio
+HTTP 404 (`STUDIO_NOT_FOUND`).
+
+Editable fields and validation follow `POST /api/studios`; all are optional in
+a patch. At least one editable field is required. `imageAlt` can be cleared
+with an empty string or `null`. Unknown fields and invalid values return HTTP
+400 (`VALIDATION_ERROR`); submitted owner/server-managed fields cannot change
+stored ownership. Success updates `updatedAt` and returns HTTP 200 with the
+public record. Authentication failures return HTTP 401; unavailable JWKS or
+MongoDB returns HTTP 503.
+
+There is **no Delete Studio endpoint**.
+
+### Bookings
+
+Booking records are stored in the MongoDB `bookings` collection. All three
+booking endpoints require a valid Client session-data JWT. The Server derives
+user ID, email, and name from the verified identity.
+
+#### `POST /api/bookings`
+
+Request fields:
+
+| Field | Validation and behavior |
+|---|---|
+| `studioId` | Required ObjectId string or studio slug; nonexistent studio returns HTTP 404 (`STUDIO_NOT_FOUND`). |
+| `bookingDate` | Required string combined with start/end time and parsed as a date/time. Past starts are rejected. |
+| `startTime`, `endTime` | Required strings; end must follow start and duration must be at most 24 hours. |
+
+The Server snapshots the stored studio hourly rate and calculates
+`round(hourlyRate × durationHours, 2)`. Security deposit is not included.
+Successful insertion returns HTTP 201 and creates a `Pending` booking; success
+does not mean host confirmation.
+
+Before insertion the handler looks for an overlapping `Confirmed` booking for
+the studio. A match returns HTTP 409 (`BOOKING_CONFLICT`). This is a
+find-then-insert check, not an atomic reservation: concurrent requests can race,
+and pending requests do not block one another. There is no host approval or
+confirmation endpoint. Current routes create `Pending` and transition a
+pending booking to `Cancelled`; they do not create `Confirmed` or `Completed`
+records.
+
+Invalid fields return HTTP 400 (`VALIDATION_ERROR`); missing/invalid identity
+returns HTTP 401; JWKS or database unavailability returns HTTP 503; unexpected
+errors return HTTP 500.
+
+#### `GET /api/bookings/mine`
+
+Returns HTTP 200 with only records whose `userId` matches the verified
+identity, sorted newest first. No bookings returns an empty array. Missing
+identity returns HTTP 401; unavailable JWKS or MongoDB returns HTTP 503.
+
+#### `PATCH /api/bookings/:id/cancel`
+
+The path ID must be a MongoDB ObjectId. The endpoint only allows the booking's
+verified owner to cancel a `Pending` record, changing its status to `Cancelled`
+and updating `updatedAt`; success returns HTTP 200. Malformed or absent booking
+returns HTTP 404 (`BOOKING_NOT_FOUND`), another user's booking HTTP 403
+(`FORBIDDEN`), and a non-pending booking HTTP 400 (`INVALID_BOOKING_STATUS`).
+Authentication or database failures return HTTP 401 or 503, respectively.
+
+### Reviews and unsupported operations
+
+There are no review routes, booking approval/confirmation routes, or studio
+deletion route in the current Server source. Do not infer these capabilities
+from fields rendered by the Client.
+
+## MongoDB, indexes, and seed data
+
+The Server uses the MongoDB Node.js driver and one reusable `MongoClient`
+connection in `src/config/database.js`, selecting `MONGODB_DB_NAME` and pinging
+the database at startup. No in-memory fallback exists. In development, missing
+`MONGODB_URI` permits a degraded HTTP process with readiness 503; in production
+it prevents startup. Connection failures are reported without returning
+credentials or raw driver details.
+
+`src/config/indexes.js` declares these booking indexes:
+
+| Collection | Index | Keys |
+|---|---|---|
+| `bookings` | `bookings_user_createdAt` | `{ userId: 1, createdAt: -1 }` |
+| `bookings` | `bookings_studio_status_window` | `{ studioId: 1, status: 1, startAt: 1, endAt: 1 }` |
+
+When configured, the Server attempts index creation during startup. Repeated
+creation of matching indexes is idempotent. A per-index failure is logged and
+does not block startup. These indexes improve lookup performance; they do not
+provide atomic booking-overlap enforcement.
+
+`npm run seed:studios` runs `scripts/seed-studios.js`, which inserts six demo
+studio records into the `studios` collection. It requires `MONGODB_URI` and
+uses `MONGODB_DB_NAME` or defaults to `studiospace`. It checks each deterministic
+`seedId` before insert, so repeat runs skip already-seeded records; it does not
+update existing seed records or clear collections. The seed command was not
+run as part of this documentation audit.
+
+## Tests and scripts
+
+```sh
+npm run dev
+npm start
+npm test
+npm run check
+npm run seed:studios
 ```
 
-```json
-{
-  "title": "Daylight Photo Studio",
-  "categorySlug": "photo-studios",
-  "hourlyRate": 95,
-  "securityDeposit": 150,
-  "capacity": 8,
-  "location": "Brooklyn, New York",
-  "image": "https://images.example.com/daylight-studio.jpg",
-  "imageAlt": "A bright photography studio",
-  "amenities": ["Natural light", "Backdrop", "Changing area"],
-  "overview": "A detailed description of the studio and its creative space."
-}
-```
+`npm test` uses Node's built-in test runner. Existing tests cover health and
+readiness, environment configuration, credentialed CORS, error responses,
+JWT/JWKS verification and studio route behavior, and index declarations.
+There are no dedicated booking endpoint tests. Server auth tests use generated
+test JWTs; they do not perform Better Auth signup or MongoDB authentication
+persistence integration. `npm run check` runs `node --check` on the listed
+server and test files.
 
-Success returns HTTP 201 and the safe public studio representation:
+## Client integration and limitations
 
-```json
-{
-  "success": true,
-  "message": "Studio created successfully",
-  "data": {
-    "id": "65c7a6b0c9d2fddc4493e001",
-    "title": "Daylight Photo Studio",
-    "slug": "daylight-photo-studio-65c7a6b0c9d2fddc4493e001",
-    "category": "Photo Studios",
-    "categorySlug": "photo-studios"
-  }
-}
-```
+The separate Next.js Client configures its Express API origin with
+`NEXT_PUBLIC_API_BASE_URL` (local default `http://localhost:5000`). The current
+Client uses the Server's public studio reads and protected create/list/update
+routes, plus booking create/list/cancel routes. Client and Server must be
+configured independently, and production cookie transport between their
+domains remains to be verified.
 
-Validation errors return HTTP 400:
-
-```json
-{
-  "success": false,
-  "message": "hourlyRate must be a finite positive number.",
-  "code": "VALIDATION_ERROR",
-  "details": null
-}
-```
-
-Missing or invalid JWT-backed session cookies return HTTP 401 with
-`code: "UNAUTHENTICATED"`. If the Client JWKS endpoint cannot be reached,
-verification returns HTTP 503 with `code: "AUTHENTICATION_UNAVAILABLE"`. If
-MongoDB is unavailable after authentication, the endpoint returns HTTP 503
-with `code: "DATABASE_NOT_READY"`. Database errors use the standard generic
-HTTP 500 response without MongoDB internals.
-
-The created studio can be fetched immediately with
-`GET /api/studios/<slug>` or `GET /api/studios/<id>`, and also appears in
-`GET /api/studios`.
-
-## Project boundaries and roadmap
-
-This repository is independent of
-[`studiospace-client`](https://github.com/Fahim-mukim/studiospace-client), with
-its own package manifest, lockfile, environment, Git history, and deployment.
-No client files or shared imports belong in this repository. Future client
-integration will use a configurable HTTP API base URL.
-
-Studio update/delete, reviews, and booking APIs remain future milestones. The
-separately maintained client is not modified by server authentication or studio
-creation work.
+This README and the Client's
+[requirement traceability](https://github.com/Fahim-mukim/studiospace-client/blob/main/docs/requirement-traceability.md)
+describe implemented endpoints and known gaps; they are not certification
+against the original assignment, which has not been located.
