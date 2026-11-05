@@ -283,13 +283,14 @@ npm run check
 npm run seed:studios
 ```
 
-`npm test` uses Node's built-in test runner. Existing tests cover health and
-readiness, environment configuration, credentialed CORS, error responses,
-JWT/JWKS verification and studio route behavior, and index declarations.
-There are no dedicated booking endpoint tests. Server auth tests use generated
-test JWTs; they do not perform Better Auth signup or MongoDB authentication
-persistence integration. `npm run check` runs `node --check` on the listed
-server and test files.
+`npm test` uses Node's built-in test runner. Tests cover health and readiness,
+environment configuration, credentialed CORS, error responses, JWT/JWKS
+verification, studio routes, booking create/list/cancel routes, and index
+declarations. Booking route tests use an isolated in-memory database mock and
+the production route registration; they do not connect to MongoDB. Server auth
+tests use generated test JWTs and do not perform Better Auth signup or MongoDB
+authentication persistence integration. `npm run check` runs `node --check`
+on the listed server and test files.
 
 ## Client integration and limitations
 
